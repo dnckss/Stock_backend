@@ -1,48 +1,68 @@
 import asyncio
+import logging
 from datetime import datetime
 
-from config import SCAN_INTERVAL_SEC, ERROR_RETRY_SEC, REPORT_TOP_N, MACRO_INTERVAL_SEC
-from services.scanner import get_all_tickers, scan_stocks, fetch_macro_indicators
+from config import (
+    SCAN_INTERVAL_SEC,
+    ERROR_RETRY_SEC,
+    REPORT_TOP_N,
+    MACRO_INTERVAL_SEC,
+    PRICE_TICK_INTERVAL_SEC,
+    PRICE_TICK_MAX_SYMBOLS,
+)
+from services.scanner import (
+    get_all_tickers,
+    scan_stocks,
+    fetch_macro_indicators,
+    get_market_gauge,
+    refresh_intraday_prices,
+    merge_intraday_into_candidates,
+)
 from services.sentiment import analyze_sentiments
+from services.earnings import get_earnings_surprises
 from services.analyst import compute_signals
 from services.crud import save_candidates, sanitize_for_json
 from services.websocket import manager, latest_cache
 from services.news_feed import build_news_feed
 
+logger = logging.getLogger(__name__)
+
 
 async def run_analysis_loop():
     """
     1시간 주기 자동 분석 파이프라인:
-      Step 1: 전 종목 스캔 + 잡주 필터링 + Top 15
-      Step 2: 비동기 감성 분석
-      Step 3: 괴리율 계산
-      Step 4: DB 저장 + WebSocket 브로드캐스트
+      Step 1: yfinance로 S&P 500 전 종목 스캔 + 거래량 필터링
+      Step 2: 비동기 감성 분석 (FinBERT)
+      Step 3: 실적 서프라이즈(이익 괴리) 조회
+      Step 4: 시그널 계산 (이익 괴리 우선, 감성 fallback)
+      Step 5: DB 저장 + WebSocket 브로드캐스트
     """
-    tickers = get_all_tickers()
+    # get_all_tickers/scan_stocks 등은 동기 + 네트워크/CPU 작업이어서 이벤트 루프를 막을 수 있다.
+    tickers = await asyncio.to_thread(get_all_tickers)
 
     while True:
         try:
             start = datetime.now()
-            print(f"\n⚡ 스캔 엔진 가동: {start.strftime('%H:%M:%S')}")
+            logger.info("스캔 엔진 가동: %s", start.strftime("%H:%M:%S"))
 
-            # Step 1
-            candidates = scan_stocks(tickers)
+            candidates = await asyncio.to_thread(scan_stocks, tickers)
             if not candidates:
-                print("⚠️ 유효 종목 0개 — 다음 사이클 대기")
+                logger.warning("유효 종목 0개 — 다음 사이클 대기")
                 await asyncio.sleep(ERROR_RETRY_SEC)
                 continue
 
-            # Step 2
             ticker_list = [c["ticker"] for c in candidates]
+
             sentiments = await analyze_sentiments(ticker_list)
 
-            # Step 3
-            candidates = compute_signals(candidates, sentiments)
+            logger.info("실적 서프라이즈 조회 시작 (%s개)...", len(ticker_list))
+            earnings = await asyncio.to_thread(get_earnings_surprises, ticker_list)
+            earned_count = sum(1 for e in earnings if e is not None)
+            logger.info("실적 서프라이즈: %s/%s개 확보", earned_count, len(ticker_list))
 
-            # Step 4 (리포트는 사용자 요청 시 온디맨드 생성)
-            save_candidates(candidates)
+            candidates = compute_signals(candidates, sentiments, earnings)
+            await asyncio.to_thread(save_candidates, candidates)
 
-            # News Feed (AI SENTIMENT FEED)
             latest_cache["news_feed"] = await build_news_feed(ticker_list)
 
             top = candidates[:REPORT_TOP_N]
@@ -52,30 +72,82 @@ async def run_analysis_loop():
             await manager.broadcast({"type": "MARKET_UPDATE", **sanitize_for_json(latest_cache)})
 
             elapsed = datetime.now() - start
-            print(f"✅ 스캔 완료! (소요: {elapsed})")
+            logger.info("스캔 완료 (소요: %s)", elapsed)
             await asyncio.sleep(SCAN_INTERVAL_SEC)
 
         except Exception as e:
-            print(f"❌ 엔진 에러: {e}")
+            logger.exception("엔진 에러: %s", e)
             await asyncio.sleep(ERROR_RETRY_SEC)
 
 
 async def run_macro_loop():
     """
     5분 주기 매크로 지표 업데이트 루프.
-    marquee/sidebar 데이터를 수집하여 latest_cache에 통합하고 WebSocket으로 브로드캐스트한다.
+    yfinance fast_info로 글로벌 지표를 수집하여 latest_cache에 반영하고 WebSocket으로 브로드캐스트한다.
     """
     while True:
         try:
-            macro = fetch_macro_indicators()
+            macro = await asyncio.to_thread(fetch_macro_indicators)
             count = len(macro["marquee"]) + len(macro["sidebar"])
 
             latest_cache["macro"] = macro
+            gauge_data = get_market_gauge(macro)
+            latest_cache["market_gauge"] = gauge_data["market_gauge"]
+            latest_cache["vix"] = gauge_data["vix"]
             latest_cache["updated_at"] = datetime.now().isoformat()
             await manager.broadcast({"type": "MARKET_UPDATE", **sanitize_for_json(latest_cache)})
 
-            print(f"📈 매크로 지표 {count}개 업데이트 완료")
+            logger.info("매크로 지표 %s개 업데이트 완료", count)
         except Exception as e:
-            print(f"❌ 매크로 에러: {e}")
+            logger.exception("매크로 에러: %s", e)
 
         await asyncio.sleep(MACRO_INTERVAL_SEC)
+
+
+def _tickers_for_price_refresh() -> list[str]:
+    """top_picks + radar에서 중복 제거 후 최대 PRICE_TICK_MAX_SYMBOLS개."""
+    top = latest_cache.get("top_picks") or []
+    radar = latest_cache.get("radar") or []
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in list(top) + list(radar):
+        t = (c.get("ticker") or "").upper().strip()
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+        if len(out) >= PRICE_TICK_MAX_SYMBOLS:
+            break
+    return out
+
+
+async def run_price_tick_loop():
+    """
+    yfinance 분봉으로 top/radar 종목의 price·volume만 짧은 주기로 갱신한다.
+    (전체 스캔·감성·실적은 run_analysis_loop 주기 유지)
+    """
+    if PRICE_TICK_INTERVAL_SEC <= 0:
+        logger.info("분봉 시세 틱 비활성화 (PRICE_TICK_INTERVAL_SEC<=0)")
+        return
+
+    while True:
+        try:
+            tickers = _tickers_for_price_refresh()
+            if not tickers:
+                await asyncio.sleep(PRICE_TICK_INTERVAL_SEC)
+                continue
+
+            live = await asyncio.to_thread(refresh_intraday_prices, tickers)
+            if live:
+                merge_intraday_into_candidates(latest_cache.get("top_picks") or [], live)
+                merge_intraday_into_candidates(latest_cache.get("radar") or [], live)
+                latest_cache["quote_tick_at"] = datetime.now().isoformat()
+                latest_cache["updated_at"] = datetime.now().isoformat()
+                await manager.broadcast({"type": "MARKET_UPDATE", **sanitize_for_json(latest_cache)})
+                logger.debug("분봉 시세 갱신 완료 (%s/%s 심볼)", len(live), len(tickers))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.exception("가격 틱 루프 에러: %s", e)
+
+        await asyncio.sleep(PRICE_TICK_INTERVAL_SEC)

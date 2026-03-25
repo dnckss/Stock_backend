@@ -29,5 +29,8 @@ latest_cache: Dict[str, Any] = {
     "radar": [],
     "macro": {"marquee": [], "sidebar": []},
     "news_feed": [],
+    "market_gauge": None,
+    "vix": None,
     "updated_at": None,
+    "quote_tick_at": None,  # yfinance 분봉 시세 마지막 반영 시각
 }
