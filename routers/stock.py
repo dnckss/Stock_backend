@@ -41,7 +41,7 @@ async def _get_company_name(ticker: str) -> str:
 
 
 @router.get("/stock/{ticker}")
-async def api_stock_detail(ticker: str, news_limit: int = 10):
+async def api_stock_detail(ticker: str, news_limit: int = 10, news_refresh: int = 0):
     """
     종목 상세 분석 페이지용 엔드포인트.
     - latest_report: 가장 최근 AI 리포트 전문 1건
@@ -51,7 +51,7 @@ async def api_stock_detail(ticker: str, news_limit: int = 10):
     company_name = await _get_company_name(upper)
     latest = get_latest_report(upper)
     history = get_history(upper, days=30)
-    stock_news = await build_stock_news_feed(upper, limit=news_limit)
+    stock_news = await build_stock_news_feed(upper, limit=news_limit, refresh=bool(news_refresh))
 
     if not latest and not history and not stock_news:
         raise HTTPException(status_code=404, detail=f"{upper} 데이터 없음")
@@ -62,4 +62,7 @@ async def api_stock_detail(ticker: str, news_limit: int = 10):
         "latest_report": latest,
         "history": history,
         "stock_news": stock_news,
+        "stock_news_meta": {
+            "refresh": bool(news_refresh),
+        },
     }

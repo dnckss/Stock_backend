@@ -79,6 +79,18 @@ NEWS_CRAWL_TIMEOUT_SEC = float(os.getenv("NEWS_CRAWL_TIMEOUT_SEC", "12"))
 NEWS_CRAWL_MAX_CONCURRENT = int(os.getenv("NEWS_CRAWL_MAX_CONCURRENT", "3"))
 NEWS_ARTICLE_MAX_CHARS = int(os.getenv("NEWS_ARTICLE_MAX_CHARS", "20000"))
 
+# News analysis (Korean summary + market impact)
+NEWS_ANALYSIS_OPENAI_MODEL = os.getenv("NEWS_ANALYSIS_OPENAI_MODEL", "gpt-4o")
+# 주 모델이 400(파라미터/엔드포인트 불일치)일 때 한 번 더 시도할 모델
+NEWS_ANALYSIS_FALLBACK_OPENAI_MODEL = os.getenv(
+    "NEWS_ANALYSIS_FALLBACK_OPENAI_MODEL", "gpt-4o"
+)
+NEWS_ANALYSIS_TIMEOUT_SEC = int(os.getenv("NEWS_ANALYSIS_TIMEOUT_SEC", "18"))
+NEWS_ANALYSIS_THREAD_BUFFER_SEC = int(os.getenv("NEWS_ANALYSIS_THREAD_BUFFER_SEC", "2"))
+NEWS_ANALYSIS_TEMPERATURE = float(os.getenv("NEWS_ANALYSIS_TEMPERATURE", "0.2"))
+# LLM 입력으로 넣는 본문 최대 길이 (토큰/요청 크기 완화)
+NEWS_ANALYSIS_INPUT_MAX_CHARS = int(os.getenv("NEWS_ANALYSIS_INPUT_MAX_CHARS", "12000"))
+
 # Macro Indicators
 MACRO_INTERVAL_SEC = 300
 

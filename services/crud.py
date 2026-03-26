@@ -3,6 +3,7 @@ import sqlite3
 import pandas as pd
 from datetime import timedelta
 from datetime import datetime
+import json
 
 from config import DB_PATH, STRATEGIST_LATEST_SCAN_WINDOW_MINUTES, NEWS_ARTICLE_CACHE_TTL_SEC
 
@@ -46,9 +47,18 @@ def init_db():
             url TEXT NOT NULL,
             title TEXT,
             publisher TEXT,
+            author TEXT,
             ticker TEXT,
             timestamp INTEGER,
             article_text TEXT,
+            article_markdown TEXT,
+            media_json TEXT,
+            domains_json TEXT,
+            extraction_status TEXT,
+            error_reason TEXT,
+            http_status INTEGER,
+            final_url TEXT,
+            canonical_url TEXT,
             fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -56,6 +66,7 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_news_fetched_at ON news_articles (fetched_at)")
 
     _migrate_columns(cur)
+    _migrate_news_articles_columns(cur)
 
     conn.commit()
     conn.close()
@@ -75,6 +86,28 @@ def _migrate_columns(cur: sqlite3.Cursor):
     for col_name, col_type in new_columns:
         if col_name not in existing:
             cur.execute(f"ALTER TABLE analysis_results ADD COLUMN {col_name} {col_type}")
+
+
+def _migrate_news_articles_columns(cur: sqlite3.Cursor):
+    cur.execute("PRAGMA table_info(news_articles)")
+    existing = {row[1] for row in cur.fetchall()}
+
+    new_columns = [
+        ("author", "TEXT"),
+        ("article_markdown", "TEXT"),
+        ("media_json", "TEXT"),
+        ("domains_json", "TEXT"),
+        ("extraction_status", "TEXT"),
+        ("error_reason", "TEXT"),
+        ("http_status", "INTEGER"),
+        ("final_url", "TEXT"),
+        ("canonical_url", "TEXT"),
+        ("analysis_json", "TEXT"),
+        ("analysis_at", "TIMESTAMP"),
+    ]
+    for col_name, col_type in new_columns:
+        if col_name not in existing:
+            cur.execute(f"ALTER TABLE news_articles ADD COLUMN {col_name} {col_type}")
 
 
 def save_candidates(candidates: list):
@@ -171,7 +204,12 @@ def get_cached_news_article(url_hash: str) -> dict | None:
     conn = sqlite3.connect(DB_PATH)
     df = pd.read_sql_query(
         """
-        SELECT url_hash, url, title, publisher, ticker, timestamp, article_text, fetched_at
+        SELECT url_hash, url, title, publisher, author, ticker, timestamp,
+               article_text, article_markdown,
+               media_json, domains_json,
+               extraction_status, error_reason, http_status, final_url, canonical_url,
+               analysis_json, analysis_at,
+               fetched_at
         FROM news_articles
         WHERE url_hash = ?
         LIMIT 1
@@ -185,6 +223,19 @@ def get_cached_news_article(url_hash: str) -> dict | None:
         return None
 
     row = rows[0]
+    # json decode (best-effort)
+    try:
+        row["media"] = json.loads(row.get("media_json") or "[]")
+    except Exception:
+        row["media"] = []
+    try:
+        row["domains"] = json.loads(row.get("domains_json") or "{}")
+    except Exception:
+        row["domains"] = {}
+    try:
+        row["analysis"] = json.loads(row.get("analysis_json") or "null")
+    except Exception:
+        row["analysis"] = None
     fetched_at = row.get("fetched_at")
     try:
         fetched_dt = pd.to_datetime(fetched_at, errors="coerce")
@@ -208,15 +259,32 @@ def upsert_news_article(item: dict) -> None:
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO news_articles (url_hash, url, title, publisher, ticker, timestamp, article_text, fetched_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        INSERT INTO news_articles (
+            url_hash, url, title, publisher, author, ticker, timestamp,
+            article_text, article_markdown, media_json, domains_json,
+            extraction_status, error_reason, http_status, final_url, canonical_url,
+            analysis_json, analysis_at,
+            fetched_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         ON CONFLICT(url_hash) DO UPDATE SET
             url=excluded.url,
             title=excluded.title,
             publisher=excluded.publisher,
+            author=excluded.author,
             ticker=excluded.ticker,
             timestamp=excluded.timestamp,
             article_text=excluded.article_text,
+            article_markdown=excluded.article_markdown,
+            media_json=excluded.media_json,
+            domains_json=excluded.domains_json,
+            extraction_status=excluded.extraction_status,
+            error_reason=excluded.error_reason,
+            http_status=excluded.http_status,
+            final_url=excluded.final_url,
+            canonical_url=excluded.canonical_url,
+            analysis_json=excluded.analysis_json,
+            analysis_at=excluded.analysis_at,
             fetched_at=CURRENT_TIMESTAMP
         """,
         (
@@ -224,9 +292,19 @@ def upsert_news_article(item: dict) -> None:
             item.get("url"),
             item.get("title"),
             item.get("publisher"),
+            item.get("author"),
             item.get("ticker"),
             item.get("timestamp"),
             item.get("article_text"),
+            item.get("article_markdown"),
+            json.dumps(item.get("media") or [], ensure_ascii=False),
+            json.dumps(item.get("domains") or {}, ensure_ascii=False),
+            item.get("extraction_status"),
+            item.get("error_reason"),
+            item.get("http_status"),
+            item.get("final_url"),
+            item.get("canonical_url"),
+            json.dumps(item.get("analysis"), ensure_ascii=False) if item.get("analysis") is not None else None,
         ),
     )
     conn.commit()

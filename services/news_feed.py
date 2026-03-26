@@ -123,7 +123,7 @@ async def build_news_feed(tickers: list[str]) -> list[dict[str, Any]]:
     return feed
 
 
-async def build_stock_news_feed(ticker: str, limit: int = 10) -> list[dict[str, Any]]:
+async def build_stock_news_feed(ticker: str, limit: int = 10, refresh: bool = False) -> list[dict[str, Any]]:
     """
     단일 종목 상세 페이지용 뉴스 피드를 생성한다.
     - yfinance Ticker.get_news() 수집
@@ -136,7 +136,7 @@ async def build_stock_news_feed(ticker: str, limit: int = 10) -> list[dict[str, 
         return []
 
     safe_limit = max(1, min(int(limit), 30))
-    if _is_stock_news_fresh(upper):
+    if not refresh and _is_stock_news_fresh(upper):
         return _stock_news_cache[upper][1][:safe_limit]
 
     fetch_count = max(safe_limit, 10)
