@@ -2,13 +2,16 @@ from dotenv import load_dotenv
 import os
 
 load_dotenv()
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "quant_trading.db")
+
+# Supabase
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
 
 # Strategist (Market Strategy) OpenAI model
-STRATEGIST_OPENAI_MODEL = os.getenv("STRATEGIST_OPENAI_MODEL", "gpt-4o")
+STRATEGIST_OPENAI_MODEL = os.getenv("STRATEGIST_OPENAI_MODEL", "gpt-5")
 STRATEGIST_OPENAI_TIMEOUT_SEC = int(os.getenv("STRATEGIST_OPENAI_TIMEOUT_SEC", "20"))
 # asyncio.wait_for는 클라이언트 timeout보다 약간 여유를 둔다.
 STRATEGIST_OPENAI_THREAD_BUFFER_SEC = int(os.getenv("STRATEGIST_OPENAI_THREAD_BUFFER_SEC", "2"))
@@ -73,6 +76,19 @@ SENTIMENT_FINVIZ_RETRY_BASE_SEC = float(os.getenv("SENTIMENT_FINVIZ_RETRY_BASE_S
 NEWS_FEED_MAX_ITEMS = 30
 NEWS_FEED_TTL_SEC = 300
 
+# Economic Calendar (Investing.com)
+ECON_CALENDAR_URL = os.getenv(
+    "ECON_CALENDAR_URL", "https://kr.investing.com/economic-calendar"
+)
+ECON_CALENDAR_SERVICE_URL = os.getenv(
+    "ECON_CALENDAR_SERVICE_URL",
+    "https://kr.investing.com/economic-calendar/Service/getCalendarFilteredData",
+)
+ECON_CALENDAR_TTL_SEC = int(os.getenv("ECON_CALENDAR_TTL_SEC", "600"))
+ECON_CALENDAR_TIMEOUT_SEC = float(os.getenv("ECON_CALENDAR_TIMEOUT_SEC", "12"))
+ECON_CALENDAR_MAX_ITEMS = int(os.getenv("ECON_CALENDAR_MAX_ITEMS", "50"))
+ECON_CALENDAR_RANGE_DAYS = int(os.getenv("ECON_CALENDAR_RANGE_DAYS", "3"))
+
 # News article crawling (from yfinance news url)
 NEWS_ARTICLE_CACHE_TTL_SEC = int(os.getenv("NEWS_ARTICLE_CACHE_TTL_SEC", "21600"))  # 6h
 NEWS_CRAWL_TIMEOUT_SEC = float(os.getenv("NEWS_CRAWL_TIMEOUT_SEC", "12"))
@@ -80,10 +96,10 @@ NEWS_CRAWL_MAX_CONCURRENT = int(os.getenv("NEWS_CRAWL_MAX_CONCURRENT", "3"))
 NEWS_ARTICLE_MAX_CHARS = int(os.getenv("NEWS_ARTICLE_MAX_CHARS", "20000"))
 
 # News analysis (Korean summary + market impact)
-NEWS_ANALYSIS_OPENAI_MODEL = os.getenv("NEWS_ANALYSIS_OPENAI_MODEL", "gpt-4o")
+NEWS_ANALYSIS_OPENAI_MODEL = os.getenv("NEWS_ANALYSIS_OPENAI_MODEL", "gpt-5")
 # 주 모델이 400(파라미터/엔드포인트 불일치)일 때 한 번 더 시도할 모델
 NEWS_ANALYSIS_FALLBACK_OPENAI_MODEL = os.getenv(
-    "NEWS_ANALYSIS_FALLBACK_OPENAI_MODEL", "gpt-4o"
+    "NEWS_ANALYSIS_FALLBACK_OPENAI_MODEL", "gpt-5"
 )
 NEWS_ANALYSIS_TIMEOUT_SEC = int(os.getenv("NEWS_ANALYSIS_TIMEOUT_SEC", "18"))
 NEWS_ANALYSIS_THREAD_BUFFER_SEC = int(os.getenv("NEWS_ANALYSIS_THREAD_BUFFER_SEC", "2"))

@@ -1,11 +1,23 @@
 import math
-import sqlite3
-import pandas as pd
-from datetime import timedelta
-from datetime import datetime
 import json
+import logging
+from datetime import datetime, timedelta, timezone
 
-from config import DB_PATH, STRATEGIST_LATEST_SCAN_WINDOW_MINUTES, NEWS_ARTICLE_CACHE_TTL_SEC
+import pandas as pd
+from supabase import create_client, Client
+
+from config import SUPABASE_URL, SUPABASE_KEY, STRATEGIST_LATEST_SCAN_WINDOW_MINUTES, NEWS_ARTICLE_CACHE_TTL_SEC
+
+logger = logging.getLogger(__name__)
+
+_supabase: Client | None = None
+
+
+def _get_client() -> Client:
+    global _supabase
+    if _supabase is None:
+        _supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    return _supabase
 
 
 def sanitize_for_json(obj):
@@ -20,122 +32,28 @@ def sanitize_for_json(obj):
 
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS analysis_results (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticker TEXT NOT NULL,
-            price_return REAL,
-            sentiment REAL,
-            divergence REAL,
-            signal TEXT,
-            signal_source TEXT,
-            eps_actual REAL,
-            eps_estimate REAL,
-            earnings_surprise_pct REAL,
-            report TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_ticker ON analysis_results (ticker)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_created_at ON analysis_results (created_at)")
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS news_articles (
-            url_hash TEXT PRIMARY KEY,
-            url TEXT NOT NULL,
-            title TEXT,
-            publisher TEXT,
-            author TEXT,
-            ticker TEXT,
-            timestamp INTEGER,
-            article_text TEXT,
-            article_markdown TEXT,
-            media_json TEXT,
-            domains_json TEXT,
-            extraction_status TEXT,
-            error_reason TEXT,
-            http_status INTEGER,
-            final_url TEXT,
-            canonical_url TEXT,
-            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_news_ticker ON news_articles (ticker)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_news_fetched_at ON news_articles (fetched_at)")
-
-    _migrate_columns(cur)
-    _migrate_news_articles_columns(cur)
-
-    conn.commit()
-    conn.close()
-
-
-def _migrate_columns(cur: sqlite3.Cursor):
-    """기존 DB에 새 컬럼이 없으면 추가한다."""
-    cur.execute("PRAGMA table_info(analysis_results)")
-    existing = {row[1] for row in cur.fetchall()}
-
-    new_columns = [
-        ("signal_source", "TEXT"),
-        ("eps_actual", "REAL"),
-        ("eps_estimate", "REAL"),
-        ("earnings_surprise_pct", "REAL"),
-    ]
-    for col_name, col_type in new_columns:
-        if col_name not in existing:
-            cur.execute(f"ALTER TABLE analysis_results ADD COLUMN {col_name} {col_type}")
-
-
-def _migrate_news_articles_columns(cur: sqlite3.Cursor):
-    cur.execute("PRAGMA table_info(news_articles)")
-    existing = {row[1] for row in cur.fetchall()}
-
-    new_columns = [
-        ("author", "TEXT"),
-        ("article_markdown", "TEXT"),
-        ("media_json", "TEXT"),
-        ("domains_json", "TEXT"),
-        ("extraction_status", "TEXT"),
-        ("error_reason", "TEXT"),
-        ("http_status", "INTEGER"),
-        ("final_url", "TEXT"),
-        ("canonical_url", "TEXT"),
-        ("analysis_json", "TEXT"),
-        ("analysis_at", "TIMESTAMP"),
-    ]
-    for col_name, col_type in new_columns:
-        if col_name not in existing:
-            cur.execute(f"ALTER TABLE news_articles ADD COLUMN {col_name} {col_type}")
+    """Supabase 연결 확인. 테이블은 Supabase 대시보드/SQL에서 미리 생성."""
+    client = _get_client()
+    logger.info("Supabase 연결 완료: %s", SUPABASE_URL)
 
 
 def save_candidates(candidates: list):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
+    client = _get_client()
+    rows = []
     for item in candidates:
-        cur.execute(
-            """
-            INSERT INTO analysis_results
-                (ticker, price_return, sentiment, divergence, signal,
-                 signal_source, eps_actual, eps_estimate, earnings_surprise_pct, report)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                item["ticker"],
-                item["return"],
-                item["sentiment"],
-                item["divergence"],
-                item["signal"],
-                item.get("signal_source"),
-                item.get("eps_actual"),
-                item.get("eps_estimate"),
-                item.get("earnings_surprise_pct"),
-                item.get("report"),
-            ),
-        )
-    conn.commit()
-    conn.close()
+        rows.append({
+            "ticker": item["ticker"],
+            "price_return": _safe_value(item.get("return")),
+            "sentiment": _safe_value(item.get("sentiment")),
+            "divergence": _safe_value(item.get("divergence")),
+            "signal": item.get("signal"),
+            "signal_source": item.get("signal_source"),
+            "eps_actual": _safe_value(item.get("eps_actual")),
+            "eps_estimate": _safe_value(item.get("eps_estimate")),
+            "earnings_surprise_pct": _safe_value(item.get("earnings_surprise_pct")),
+            "report": item.get("report"),
+        })
+    client.table("analysis_results").insert(rows).execute()
 
 
 def _safe_value(v):
@@ -144,54 +62,49 @@ def _safe_value(v):
     return v
 
 
-def _sanitize(df: pd.DataFrame) -> list:
-    records = df.to_dict(orient="records")
+def _sanitize(records: list) -> list:
     return [{k: _safe_value(v) for k, v in row.items()} for row in records]
 
 
 def get_latest_report(ticker: str) -> dict | None:
-    conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query(
-        """
-        SELECT * FROM analysis_results
-        WHERE ticker = ? AND report IS NOT NULL
-        ORDER BY created_at DESC LIMIT 1
-        """,
-        conn,
-        params=(ticker.upper(),),
+    client = _get_client()
+    resp = (
+        client.table("analysis_results")
+        .select("*")
+        .eq("ticker", ticker.upper())
+        .not_.is_("report", "null")
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
     )
-    conn.close()
-    rows = _sanitize(df)
+    rows = _sanitize(resp.data)
     return rows[0] if rows else None
 
 
 def get_history(ticker: str, days: int = 30) -> list:
-    conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query(
-        """
-        SELECT price_return, sentiment, divergence, signal,
-               signal_source, eps_actual, eps_estimate, earnings_surprise_pct,
-               created_at
-        FROM analysis_results
-        WHERE ticker = ? AND created_at >= datetime('now', ?)
-        ORDER BY created_at DESC
-        """,
-        conn,
-        params=(ticker.upper(), f"-{days} days"),
+    client = _get_client()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    resp = (
+        client.table("analysis_results")
+        .select("price_return, sentiment, divergence, signal, signal_source, eps_actual, eps_estimate, earnings_surprise_pct, created_at")
+        .eq("ticker", ticker.upper())
+        .gte("created_at", cutoff)
+        .order("created_at", desc=True)
+        .execute()
     )
-    conn.close()
-    return _sanitize(df)
+    return _sanitize(resp.data)
 
 
 def get_all_records(limit: int = 100) -> list:
-    conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query(
-        "SELECT * FROM analysis_results ORDER BY created_at DESC LIMIT ?",
-        conn,
-        params=(limit,),
+    client = _get_client()
+    resp = (
+        client.table("analysis_results")
+        .select("*")
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
     )
-    conn.close()
-    return _sanitize(df)
+    return _sanitize(resp.data)
 
 
 def get_cached_news_article(url_hash: str) -> dict | None:
@@ -201,41 +114,47 @@ def get_cached_news_article(url_hash: str) -> dict | None:
     """
     if not url_hash:
         return None
-    conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query(
-        """
-        SELECT url_hash, url, title, publisher, author, ticker, timestamp,
-               article_text, article_markdown,
-               media_json, domains_json,
-               extraction_status, error_reason, http_status, final_url, canonical_url,
-               analysis_json, analysis_at,
-               fetched_at
-        FROM news_articles
-        WHERE url_hash = ?
-        LIMIT 1
-        """,
-        conn,
-        params=(url_hash,),
+    client = _get_client()
+    resp = (
+        client.table("news_articles")
+        .select("*")
+        .eq("url_hash", url_hash)
+        .limit(1)
+        .execute()
     )
-    conn.close()
-    rows = _sanitize(df)
-    if not rows:
+    if not resp.data:
         return None
 
-    row = rows[0]
-    # json decode (best-effort)
-    try:
-        row["media"] = json.loads(row.get("media_json") or "[]")
-    except Exception:
-        row["media"] = []
-    try:
-        row["domains"] = json.loads(row.get("domains_json") or "{}")
-    except Exception:
-        row["domains"] = {}
-    try:
-        row["analysis"] = json.loads(row.get("analysis_json") or "null")
-    except Exception:
-        row["analysis"] = None
+    row = _sanitize(resp.data)[0]
+
+    # json decode (best-effort) — Supabase jsonb 컬럼은 이미 dict/list로 반환될 수 있음
+    media_val = row.get("media_json")
+    if isinstance(media_val, str):
+        try:
+            row["media"] = json.loads(media_val)
+        except Exception:
+            row["media"] = []
+    else:
+        row["media"] = media_val if media_val is not None else []
+
+    domains_val = row.get("domains_json")
+    if isinstance(domains_val, str):
+        try:
+            row["domains"] = json.loads(domains_val)
+        except Exception:
+            row["domains"] = {}
+    else:
+        row["domains"] = domains_val if domains_val is not None else {}
+
+    analysis_val = row.get("analysis_json")
+    if isinstance(analysis_val, str):
+        try:
+            row["analysis"] = json.loads(analysis_val)
+        except Exception:
+            row["analysis"] = None
+    else:
+        row["analysis"] = analysis_val
+
     fetched_at = row.get("fetched_at")
     try:
         fetched_dt = pd.to_datetime(fetched_at, errors="coerce")
@@ -245,7 +164,7 @@ def get_cached_news_article(url_hash: str) -> dict | None:
     if fetched_dt is pd.NaT:
         return row
 
-    age_sec = (datetime.now() - fetched_dt.to_pydatetime()).total_seconds()
+    age_sec = (datetime.now(timezone.utc) - fetched_dt.to_pydatetime().replace(tzinfo=timezone.utc)).total_seconds()
     if age_sec > NEWS_ARTICLE_CACHE_TTL_SEC:
         return None
     return row
@@ -255,60 +174,30 @@ def upsert_news_article(item: dict) -> None:
     """
     news_articles에 url_hash 기준 upsert.
     """
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO news_articles (
-            url_hash, url, title, publisher, author, ticker, timestamp,
-            article_text, article_markdown, media_json, domains_json,
-            extraction_status, error_reason, http_status, final_url, canonical_url,
-            analysis_json, analysis_at,
-            fetched_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        ON CONFLICT(url_hash) DO UPDATE SET
-            url=excluded.url,
-            title=excluded.title,
-            publisher=excluded.publisher,
-            author=excluded.author,
-            ticker=excluded.ticker,
-            timestamp=excluded.timestamp,
-            article_text=excluded.article_text,
-            article_markdown=excluded.article_markdown,
-            media_json=excluded.media_json,
-            domains_json=excluded.domains_json,
-            extraction_status=excluded.extraction_status,
-            error_reason=excluded.error_reason,
-            http_status=excluded.http_status,
-            final_url=excluded.final_url,
-            canonical_url=excluded.canonical_url,
-            analysis_json=excluded.analysis_json,
-            analysis_at=excluded.analysis_at,
-            fetched_at=CURRENT_TIMESTAMP
-        """,
-        (
-            item.get("url_hash"),
-            item.get("url"),
-            item.get("title"),
-            item.get("publisher"),
-            item.get("author"),
-            item.get("ticker"),
-            item.get("timestamp"),
-            item.get("article_text"),
-            item.get("article_markdown"),
-            json.dumps(item.get("media") or [], ensure_ascii=False),
-            json.dumps(item.get("domains") or {}, ensure_ascii=False),
-            item.get("extraction_status"),
-            item.get("error_reason"),
-            item.get("http_status"),
-            item.get("final_url"),
-            item.get("canonical_url"),
-            json.dumps(item.get("analysis"), ensure_ascii=False) if item.get("analysis") is not None else None,
-        ),
-    )
-    conn.commit()
-    conn.close()
+    client = _get_client()
+    now = datetime.now(timezone.utc).isoformat()
+    row = {
+        "url_hash": item.get("url_hash"),
+        "url": item.get("url"),
+        "title": item.get("title"),
+        "publisher": item.get("publisher"),
+        "author": item.get("author"),
+        "ticker": item.get("ticker"),
+        "timestamp": item.get("timestamp"),
+        "article_text": item.get("article_text"),
+        "article_markdown": item.get("article_markdown"),
+        "media_json": json.dumps(item.get("media") or [], ensure_ascii=False),
+        "domains_json": json.dumps(item.get("domains") or {}, ensure_ascii=False),
+        "extraction_status": item.get("extraction_status"),
+        "error_reason": item.get("error_reason"),
+        "http_status": item.get("http_status"),
+        "final_url": item.get("final_url"),
+        "canonical_url": item.get("canonical_url"),
+        "analysis_json": json.dumps(item.get("analysis"), ensure_ascii=False) if item.get("analysis") is not None else None,
+        "analysis_at": item.get("analysis_at"),
+        "fetched_at": now,
+    }
+    client.table("news_articles").upsert(row, on_conflict="url_hash").execute()
 
 
 def get_latest_scan_records(
@@ -319,41 +208,42 @@ def get_latest_scan_records(
     window_minutes 범위 내 기록을 가져온 뒤,
     티커별로 created_at이 가장 최신 1건만 남긴다.
     """
-    conn = sqlite3.connect(DB_PATH)
-    max_row = conn.execute("SELECT MAX(created_at) FROM analysis_results").fetchone()
-    conn.close()
+    client = _get_client()
 
-    if not max_row or not max_row[0]:
+    # 1) 가장 최근 created_at 조회
+    max_resp = (
+        client.table("analysis_results")
+        .select("created_at")
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not max_resp.data:
         return []
 
-    max_ts = pd.to_datetime(max_row[0], errors="coerce")
+    max_ts_str = max_resp.data[0]["created_at"]
+    max_ts = pd.to_datetime(max_ts_str, errors="coerce")
     if max_ts is pd.NaT:
         return []
 
-    # SQLite의 created_at 기본 포맷은 보통 "YYYY-MM-DD HH:MM:SS" (space 구분)이다.
-    # cutoff를 ISO8601("...T...")로 넘기면 문자열 비교가 어긋나 빈 결과가 나올 수 있어,
-    # DB 포맷에 맞춰 통일한다.
     cutoff_dt = max_ts - timedelta(minutes=window_minutes)
-    cutoff = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
+    cutoff = cutoff_dt.isoformat()
 
-    conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query(
-        """
-        SELECT *
-        FROM analysis_results
-        WHERE created_at >= ?
-        ORDER BY created_at DESC
-        """,
-        conn,
-        params=(cutoff,),
+    # 2) cutoff 이후 레코드 조회
+    resp = (
+        client.table("analysis_results")
+        .select("*")
+        .gte("created_at", cutoff)
+        .order("created_at", desc=True)
+        .execute()
     )
-    conn.close()
 
-    if df.empty:
+    if not resp.data:
         return []
 
+    df = pd.DataFrame(resp.data)
     df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
     df = df.sort_values("created_at", ascending=False).drop_duplicates(
         subset=["ticker"], keep="first"
     )
-    return _sanitize(df)
+    return _sanitize(df.to_dict(orient="records"))
