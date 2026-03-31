@@ -43,8 +43,9 @@
 
 ### 경제 캘린더 (`services/economic_calendar.py`)
 
-- **Investing.com** (기본 `kr.investing.com`) XHR + HTML 파싱, 프로세스 내 TTL 캐시 (`ECON_CALENDAR_*`)
+- **Forex Factory** 공개 API (API 키 불필요), 프로세스 내 TTL 캐시 (`ECON_CALENDAR_*`)
 - `GET /api/economic-calendar?refresh=0|1&limit=N`
+- 시간은 KST(UTC+9) 변환, 다가올 이벤트 우선 정렬
 - 프런트/계약 참고: `docs/economic-calendar-api.md`
 
 ## 기타 핵심 모듈 (요약)

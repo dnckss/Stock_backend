@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import math
 import json
 import logging
@@ -41,8 +43,12 @@ def save_candidates(candidates: list):
     client = _get_client()
     rows = []
     for item in candidates:
+        daily = item.get("daily")
         rows.append({
             "ticker": item["ticker"],
+            "price": _safe_value(item.get("price")),
+            "volume": item.get("volume"),
+            "daily_json": json.dumps(daily, ensure_ascii=False) if daily else None,
             "price_return": _safe_value(item.get("return")),
             "sentiment": _safe_value(item.get("sentiment")),
             "divergence": _safe_value(item.get("divergence")),
@@ -59,6 +65,8 @@ def save_candidates(candidates: list):
 def _safe_value(v):
     if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
         return None
+    if hasattr(v, 'isoformat'):
+        return v.isoformat()
     return v
 
 
@@ -246,4 +254,67 @@ def get_latest_scan_records(
     df = df.sort_values("created_at", ascending=False).drop_duplicates(
         subset=["ticker"], keep="first"
     )
-    return _sanitize(df.to_dict(orient="records"))
+    records = _sanitize(df.to_dict(orient="records"))
+
+    # daily_json → daily 복원, DB 컬럼명 → 프론트 필드명 매핑
+    for row in records:
+        daily_raw = row.pop("daily_json", None)
+        if isinstance(daily_raw, str):
+            try:
+                row["daily"] = json.loads(daily_raw)
+            except Exception:
+                row["daily"] = []
+        else:
+            row["daily"] = daily_raw if daily_raw else []
+
+        # price_return → return (프론트 호환)
+        if "price_return" in row and "return" not in row:
+            row["return"] = row.pop("price_return")
+
+    return records
+
+
+# ---------------------------------------------------------------------------
+# Economic Calendar
+# ---------------------------------------------------------------------------
+
+def upsert_economic_events(events: list[dict]) -> None:
+    """경제 일정 이벤트를 DB에 upsert한다. 배치 내 중복 키는 마지막 값만 유지."""
+    if not events:
+        return
+    client = _get_client()
+    # 동일 (event_date, event_time, event, currency) 중복 제거 — 마지막 값 우선
+    seen: dict[tuple, dict] = {}
+    for e in events:
+        key = (e.get("event_date"), e.get("time_label") or None, e.get("event"), e.get("currency"))
+        seen[key] = {
+            "event_date": e.get("event_date"),
+            "event_time": e.get("time_label") or None,
+            "event_at": e.get("event_at"),
+            "country_code": e.get("country_code"),
+            "country_name": e.get("country_name"),
+            "currency": e.get("currency"),
+            "importance": e.get("importance", 0),
+            "event": e.get("event"),
+            "actual": e.get("actual"),
+            "forecast": e.get("forecast"),
+            "previous": e.get("previous"),
+        }
+    rows = list(seen.values())
+    client.table("economic_events").upsert(
+        rows, on_conflict="event_date,event_time,event,currency"
+    ).execute()
+
+
+def get_economic_events(date_from: str, limit: int = 50) -> list[dict]:
+    """date_from(YYYY-MM-DD) 이후의 경제 일정을 시간순으로 조회한다."""
+    client = _get_client()
+    resp = (
+        client.table("economic_events")
+        .select("*")
+        .gte("event_date", date_from)
+        .order("event_at", desc=False)
+        .limit(limit)
+        .execute()
+    )
+    return _sanitize(resp.data)
