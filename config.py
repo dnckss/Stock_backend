@@ -76,18 +76,11 @@ SENTIMENT_FINVIZ_RETRY_BASE_SEC = float(os.getenv("SENTIMENT_FINVIZ_RETRY_BASE_S
 NEWS_FEED_MAX_ITEMS = 30
 NEWS_FEED_TTL_SEC = 300
 
-# Economic Calendar (Investing.com)
-ECON_CALENDAR_URL = os.getenv(
-    "ECON_CALENDAR_URL", "https://kr.investing.com/economic-calendar"
-)
-ECON_CALENDAR_SERVICE_URL = os.getenv(
-    "ECON_CALENDAR_SERVICE_URL",
-    "https://kr.investing.com/economic-calendar/Service/getCalendarFilteredData",
-)
-ECON_CALENDAR_TTL_SEC = int(os.getenv("ECON_CALENDAR_TTL_SEC", "600"))
+# Economic Calendar (myfxbook 크롤링)
+ECON_CALENDAR_TTL_SEC = int(os.getenv("ECON_CALENDAR_TTL_SEC", "600"))  # 10분
+ECON_CALENDAR_INTERVAL_SEC = int(os.getenv("ECON_CALENDAR_INTERVAL_SEC", "600"))  # 10분 주기 크롤링
 ECON_CALENDAR_TIMEOUT_SEC = float(os.getenv("ECON_CALENDAR_TIMEOUT_SEC", "12"))
-ECON_CALENDAR_MAX_ITEMS = int(os.getenv("ECON_CALENDAR_MAX_ITEMS", "50"))
-ECON_CALENDAR_RANGE_DAYS = int(os.getenv("ECON_CALENDAR_RANGE_DAYS", "3"))
+ECON_CALENDAR_MAX_ITEMS = int(os.getenv("ECON_CALENDAR_MAX_ITEMS", "500"))
 
 # News article crawling (from yfinance news url)
 NEWS_ARTICLE_CACHE_TTL_SEC = int(os.getenv("NEWS_ARTICLE_CACHE_TTL_SEC", "21600"))  # 6h

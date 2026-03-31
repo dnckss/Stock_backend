@@ -9,6 +9,7 @@ from config import (
     MACRO_INTERVAL_SEC,
     PRICE_TICK_INTERVAL_SEC,
     PRICE_TICK_MAX_SYMBOLS,
+    ECON_CALENDAR_INTERVAL_SEC,
 )
 from services.scanner import (
     get_all_tickers,
@@ -151,3 +152,18 @@ async def run_price_tick_loop():
             logger.exception("가격 틱 루프 에러: %s", e)
 
         await asyncio.sleep(PRICE_TICK_INTERVAL_SEC)
+
+
+async def run_econ_calendar_loop():
+    """30분 주기 경제 캘린더 크롤링 루프."""
+    from services.economic_calendar import fetch_economic_calendar
+
+    while True:
+        try:
+            result = await fetch_economic_calendar(refresh=True)
+            count = len(result.get("items") or [])
+            logger.info("경제 캘린더 갱신 완료: %d건", count)
+        except Exception as e:
+            logger.exception("경제 캘린더 루프 에러: %s", e)
+
+        await asyncio.sleep(ECON_CALENDAR_INTERVAL_SEC)
