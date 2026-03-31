@@ -6,6 +6,8 @@ from typing import Any
 from services.article_crawler import fetch_and_extract
 from services.crud import get_cached_news_article, upsert_news_article, sanitize_for_json
 from config import NEWS_ARTICLE_CACHE_TTL_SEC
+from services.finbert import analyze_text
+from services.news_sentiment import normalize_to_polarity, polarity_to_ko
 from services.news_analysis import analyze_news_korean
 
 
@@ -37,6 +39,14 @@ async def get_news_article(url: str, refresh: bool = False, analyze: bool = True
     if not refresh:
         cached = get_cached_news_article(url_hash)
         if cached:
+            # 리스트(FinBERT)와 상세(LLM) 비교가 가능하도록 상세 응답에도 FinBERT를 포함한다.
+            try:
+                title = cached.get("title") or ""
+                fb = analyze_text(title) if title else {"label": "neutral", "score": 0.0, "confidence": 0.0}
+                p = normalize_to_polarity(fb.get("label"))
+                cached["finbert"] = {**fb, "polarity": p, "polarity_ko": polarity_to_ko(p)}
+            except Exception:
+                cached["finbert"] = {"label": "neutral", "score": 0.0, "confidence": 0.0, "polarity": "neutral", "polarity_ko": "중립"}
             if analyze and cached.get("analysis") is None and (cached.get("article_markdown") or cached.get("article_text")):
                 try:
                     analysis = await analyze_news_korean(
@@ -69,8 +79,17 @@ async def get_news_article(url: str, refresh: bool = False, analyze: bool = True
         "article_markdown": crawled.get("article_markdown") or "",
         "media": crawled.get("media") or [],
         "domains": crawled.get("domains") or {"article": "", "media": []},
+        "finbert": None,
         "analysis": None,
     }
+
+    try:
+        title = item.get("title") or ""
+        fb = analyze_text(title) if title else {"label": "neutral", "score": 0.0, "confidence": 0.0}
+        p = normalize_to_polarity(fb.get("label"))
+        item["finbert"] = {**fb, "polarity": p, "polarity_ko": polarity_to_ko(p)}
+    except Exception:
+        item["finbert"] = {"label": "neutral", "score": 0.0, "confidence": 0.0, "polarity": "neutral", "polarity_ko": "중립"}
 
     if analyze and (item.get("article_markdown") or item.get("article_text")) and item.get("extraction_status") == "ok":
         try:

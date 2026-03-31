@@ -7,6 +7,7 @@ import yfinance as yf
 
 from config import NEWS_FEED_MAX_ITEMS, NEWS_FEED_TTL_SEC
 from services.finbert import analyze_batch
+from services.news_sentiment import normalize_to_polarity, polarity_to_ko
 
 _cache: list[dict[str, Any]] = []
 _cache_at: datetime | None = None
@@ -104,6 +105,9 @@ async def build_news_feed(tickers: list[str]) -> list[dict[str, Any]]:
     for item, fb in zip(raw_items, finbert_results):
         item["score"] = fb["score"]
         item["sentiment_label"] = fb["label"]
+        p = normalize_to_polarity(fb.get("label"))
+        item["sentiment_polarity"] = p
+        item["sentiment_ko"] = polarity_to_ko(p)
         item["confidence"] = fb["confidence"]
         feed.append(item)
 
@@ -164,6 +168,9 @@ async def build_stock_news_feed(ticker: str, limit: int = 10, refresh: bool = Fa
     for item, fb in zip(raw_items, finbert_results):
         item["score"] = fb["score"]
         item["sentiment_label"] = fb["label"]
+        p = normalize_to_polarity(fb.get("label"))
+        item["sentiment_polarity"] = p
+        item["sentiment_ko"] = polarity_to_ko(p)
         item["confidence"] = fb["confidence"]
         feed.append(item)
 

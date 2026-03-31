@@ -8,6 +8,7 @@ from typing import Any
 
 from openai import BadRequestError, OpenAI
 
+from services.news_sentiment import add_normalized_impact_fields
 from config import (
     OPENAI_API_KEY,
     NEWS_ANALYSIS_FALLBACK_OPENAI_MODEL,
@@ -132,6 +133,8 @@ def _validate(data: Any) -> dict[str, Any]:
         if not isinstance(tm, list) or not all(isinstance(x, str) for x in tm):
             raise ValueError("tickers_mentioned 형식 오류")
 
+    # UI/비교용: LLM 방향 라벨을 3분류로 정규화 필드 추가
+    data["impact"] = add_normalized_impact_fields(data.get("impact"))
     return data
 
 
