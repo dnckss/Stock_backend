@@ -44,10 +44,10 @@ def compute_technicals(ticker: str) -> dict[str, Any] | None:
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
-    close = df["Close"].dropna()
-    high = df["High"].dropna()
-    low = df["Low"].dropna()
-    volume = df["Volume"].dropna()
+    close = df["Close"].squeeze().dropna()
+    high = df["High"].squeeze().dropna()
+    low = df["Low"].squeeze().dropna()
+    volume = df["Volume"].squeeze().dropna()
 
     if len(close) < 20:
         return None
@@ -270,12 +270,12 @@ def _calc_volume_ratio(volume: pd.Series, period: int = 20) -> dict[str, Any]:
     if len(volume) < period:
         return {"volume_ratio": None}
 
-    avg_vol = volume.rolling(window=period).mean().iloc[-1]
-    if avg_vol == 0:
+    avg_vol = float(volume.rolling(window=period).mean().iloc[-1])
+    if avg_vol == 0 or not math.isfinite(avg_vol):
         return {"volume_ratio": None}
 
-    current_vol = volume.iloc[-1]
-    ratio = float(current_vol) / float(avg_vol)
+    current_vol = float(volume.iloc[-1])
+    ratio = current_vol / avg_vol
     return {"volume_ratio": _safe_round(ratio, 2)}
 
 
