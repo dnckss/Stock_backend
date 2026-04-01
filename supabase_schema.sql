@@ -73,7 +73,32 @@ CREATE INDEX IF NOT EXISTS idx_econ_event_at ON economic_events (event_at);
 ALTER TABLE economic_events ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Allow all for anon" ON economic_events FOR ALL USING (true) WITH CHECK (true);
 
--- 4. Row Level Security (RLS) 비활성화 (서버 사이드에서만 접근하므로)
+-- 4. news_items 테이블 (뉴스 피드 항목)
+CREATE TABLE IF NOT EXISTS news_items (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    url_hash TEXT NOT NULL UNIQUE,
+    url TEXT NOT NULL,
+    title TEXT NOT NULL,
+    publisher TEXT,
+    ticker TEXT,
+    "timestamp" BIGINT,
+    sentiment_score DOUBLE PRECISION,
+    sentiment_label TEXT,
+    sentiment_polarity TEXT,
+    sentiment_ko TEXT,
+    confidence DOUBLE PRECISION,
+    has_article BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_news_items_ticker ON news_items (ticker);
+CREATE INDEX IF NOT EXISTS idx_news_items_timestamp ON news_items ("timestamp" DESC);
+CREATE INDEX IF NOT EXISTS idx_news_items_created ON news_items (created_at DESC);
+
+ALTER TABLE news_items ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow all for anon" ON news_items FOR ALL USING (true) WITH CHECK (true);
+
+-- 5. Row Level Security (RLS) 비활성화 (서버 사이드에서만 접근하므로)
 -- 필요 시 Supabase 대시보드에서 RLS를 활성화하고 정책을 추가하세요.
 ALTER TABLE analysis_results ENABLE ROW LEVEL SECURITY;
 ALTER TABLE news_articles ENABLE ROW LEVEL SECURITY;

@@ -127,6 +127,17 @@ async def build_news_feed(tickers: list[str]) -> list[dict[str, Any]]:
 
     feed = deduped[:NEWS_FEED_MAX_ITEMS]
 
+    # DB에 저장 (url_hash 추가)
+    for item in feed:
+        url = (item.get("url") or "").strip()
+        if url:
+            item["url_hash"] = _hash_url(url)
+    try:
+        from services.crud import upsert_news_items
+        upsert_news_items(feed)
+    except Exception as e:
+        logger.warning("뉴스 피드 DB 저장 실패: %s", e)
+
     _cache = feed
     _cache_at = datetime.now()
     return feed
@@ -207,7 +218,7 @@ async def prefetch_news_articles(feed: list[dict[str, Any]]) -> None:
     이미 캐시된 기사는 건너뛴다. 사용자가 상세보기를 눌렀을 때 즉시 응답할 수 있도록 한다.
     """
     from services.article_crawler import fetch_and_extract
-    from services.crud import get_cached_news_article, upsert_news_article
+    from services.crud import get_cached_news_article, upsert_news_article, mark_news_item_has_article
 
     urls_to_fetch: list[dict[str, Any]] = []
     for item in feed:
@@ -248,6 +259,10 @@ async def prefetch_news_articles(feed: list[dict[str, Any]]) -> None:
                     "domains": crawled.get("domains") or {"article": "", "media": []},
                 }
                 upsert_news_article(row)
+                try:
+                    mark_news_item_has_article(entry["url_hash"])
+                except Exception:
+                    pass
             except Exception as e:
                 logger.debug("프리페치 실패 (%s): %s", entry["url"][:60], e)
 

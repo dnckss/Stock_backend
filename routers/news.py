@@ -1,9 +1,22 @@
 from fastapi import APIRouter, HTTPException
 
+from services.crud import get_news_items, sanitize_for_json
 from services.news_article import get_news_article
 from services.economic_calendar import fetch_economic_calendar
 
 router = APIRouter(prefix="/api", tags=["News"])
+
+
+@router.get("/news/list")
+async def api_news_list(limit: int = 50, ticker: str | None = None):
+    """
+    DB에 저장된 뉴스 목록 조회.
+    - limit: 반환 개수 (기본 50)
+    - ticker: 특정 종목 필터 (선택)
+    """
+    safe_limit = max(1, min(limit, 200))
+    items = get_news_items(limit=safe_limit, ticker=ticker)
+    return sanitize_for_json({"items": items, "count": len(items)})
 
 
 @router.get("/news")

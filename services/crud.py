@@ -318,3 +318,51 @@ def get_economic_events(date_from: str, limit: int = 50) -> list[dict]:
         .execute()
     )
     return _sanitize(resp.data)
+
+
+# ---------------------------------------------------------------------------
+# News Items (뉴스 피드 항목)
+# ---------------------------------------------------------------------------
+
+def upsert_news_items(items: list[dict]) -> None:
+    """뉴스 피드 항목을 DB에 upsert한다."""
+    if not items:
+        return
+    client = _get_client()
+    seen: dict[str, dict] = {}
+    for item in items:
+        url_hash = item.get("url_hash")
+        if not url_hash:
+            continue
+        seen[url_hash] = {
+            "url_hash": url_hash,
+            "url": item.get("url"),
+            "title": item.get("title"),
+            "publisher": item.get("publisher"),
+            "ticker": item.get("ticker"),
+            "timestamp": item.get("timestamp"),
+            "sentiment_score": _safe_value(item.get("score")),
+            "sentiment_label": item.get("sentiment_label"),
+            "sentiment_polarity": item.get("sentiment_polarity"),
+            "sentiment_ko": item.get("sentiment_ko"),
+            "confidence": _safe_value(item.get("confidence")),
+            "has_article": item.get("has_article", False),
+        }
+    rows = list(seen.values())
+    client.table("news_items").upsert(rows, on_conflict="url_hash").execute()
+
+
+def get_news_items(limit: int = 50, ticker: str | None = None) -> list[dict]:
+    """뉴스 피드 항목을 최신순으로 조회한다."""
+    client = _get_client()
+    query = client.table("news_items").select("*").order("timestamp", desc=True).limit(limit)
+    if ticker:
+        query = query.eq("ticker", ticker.upper())
+    resp = query.execute()
+    return _sanitize(resp.data)
+
+
+def mark_news_item_has_article(url_hash: str) -> None:
+    """뉴스 아이템의 has_article을 True로 업데이트한다."""
+    client = _get_client()
+    client.table("news_items").update({"has_article": True}).eq("url_hash", url_hash).execute()
