@@ -84,6 +84,7 @@ SENTIMENT_FINVIZ_RETRY_BASE_SEC = float(os.getenv("SENTIMENT_FINVIZ_RETRY_BASE_S
 # News Feed
 NEWS_FEED_MAX_ITEMS = 30
 NEWS_FEED_TTL_SEC = 300
+NEWS_FEED_INTERVAL_SEC = int(os.getenv("NEWS_FEED_INTERVAL_SEC", "600"))  # 10분 주기
 
 # Economic Calendar (myfxbook 크롤링)
 ECON_CALENDAR_TTL_SEC = int(os.getenv("ECON_CALENDAR_TTL_SEC", "600"))  # 10분

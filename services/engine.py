@@ -10,6 +10,8 @@ from config import (
     PRICE_TICK_INTERVAL_SEC,
     PRICE_TICK_MAX_SYMBOLS,
     ECON_CALENDAR_INTERVAL_SEC,
+    NEWS_FEED_INTERVAL_SEC,
+    NEWS_FALLBACK_TICKERS,
 )
 from services.scanner import (
     get_all_tickers,
@@ -167,3 +169,27 @@ async def run_econ_calendar_loop():
             logger.exception("경제 캘린더 루프 에러: %s", e)
 
         await asyncio.sleep(ECON_CALENDAR_INTERVAL_SEC)
+
+
+async def run_news_feed_loop():
+    """10분 주기 뉴스 피드 갱신 루프."""
+    while True:
+        try:
+            # top_picks/radar에서 티커 추출, 없으면 fallback 티커 사용
+            tickers: list[str] = []
+            for c in list(latest_cache.get("top_picks") or []) + list(latest_cache.get("radar") or []):
+                t = (c.get("ticker") or "").upper().strip()
+                if t and t not in tickers:
+                    tickers.append(t)
+            if not tickers:
+                tickers = list(NEWS_FALLBACK_TICKERS)
+
+            feed = await build_news_feed(tickers)
+            latest_cache["news_feed"] = feed
+            latest_cache["updated_at"] = datetime.now().isoformat()
+            await manager.broadcast({"type": "MARKET_UPDATE", **sanitize_for_json(latest_cache)})
+            logger.info("뉴스 피드 갱신 완료: %d건", len(feed))
+        except Exception as e:
+            logger.exception("뉴스 피드 루프 에러: %s", e)
+
+        await asyncio.sleep(NEWS_FEED_INTERVAL_SEC)

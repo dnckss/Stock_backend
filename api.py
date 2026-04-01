@@ -17,7 +17,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from services.crud import init_db, sanitize_for_json, get_latest_scan_records
-from services.engine import run_analysis_loop, run_macro_loop, run_price_tick_loop, run_econ_calendar_loop
+from services.engine import run_analysis_loop, run_macro_loop, run_price_tick_loop, run_econ_calendar_loop, run_news_feed_loop
 from services.websocket import manager, latest_cache
 from services.scanner import fetch_macro_indicators, get_market_gauge
 from services.news_feed import build_news_feed
@@ -65,11 +65,13 @@ async def lifespan(app: FastAPI):
     macro_task = asyncio.create_task(run_macro_loop())
     price_tick_task = asyncio.create_task(run_price_tick_loop())
     econ_task = asyncio.create_task(run_econ_calendar_loop())
+    news_task = asyncio.create_task(run_news_feed_loop())
     yield
     scan_task.cancel()
     macro_task.cancel()
     price_tick_task.cancel()
     econ_task.cancel()
+    news_task.cancel()
 
 
 app = FastAPI(lifespan=lifespan, title="Woochan AI Quant Terminal API")
