@@ -166,8 +166,8 @@ def scan_stocks(tickers: list[str]) -> list[dict]:
 
 def refresh_intraday_prices(tickers: list[str]) -> dict[str, dict]:
     """
-    yfinance 분봉(기본 5m)으로 당일 구간의 마지막 봉 종가·거래량·시각을 조회한다.
-    스캔 루프와 별도로 호출해 체감상 더 자주 시세를 갱신할 때 사용한다.
+    yfinance fast_info로 종목별 최신 가격을 조회한다.
+    fast_info는 장중/장후 모두 최신 가격을 반환하므로 분봉보다 신뢰성이 높다.
 
     Returns:
         { "AAPL": {"price": float, "volume": int|None, "as_of": str}, ... }
@@ -176,84 +176,28 @@ def refresh_intraday_prices(tickers: list[str]) -> dict[str, dict]:
         return {}
 
     out: dict[str, dict] = {}
-    batch_size = max(1, PRICE_DOWNLOAD_BATCH_SIZE)
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    for i in range(0, len(tickers), batch_size):
-        batch = tickers[i : i + batch_size]
-        try:
-            data = yf.download(
-                batch,
-                period="1d",
-                interval=PRICE_INTRADAY_INTERVAL,
-                group_by="ticker",
-                progress=False,
-                threads=False,
-            )
-        except Exception as e:
-            logger.warning("분봉 시세 yf.download 실패 (batch %s): %s", i, e)
+    for ticker in tickers:
+        key = (ticker or "").upper().strip()
+        if not key:
             continue
-
-        if data.empty:
-            continue
-
-        is_single = len(batch) == 1
-        for ticker in batch:
-            key = (ticker or "").upper().strip()
-            if not key:
-                continue
-            try:
-                if is_single:
-                    ticker_data = data
-                else:
-                    if key not in data.columns.get_level_values(0):
-                        continue
-                    ticker_data = data[key]
-
-                close_series = ticker_data["Close"].dropna()
-                volume_series = ticker_data["Volume"].dropna()
-                if close_series.empty:
-                    continue
-
-                last_px = float(close_series.iloc[-1])
-                if not math.isfinite(last_px):
-                    continue
-
-                last_ts = close_series.index[-1]
-                as_of = (
-                    last_ts.strftime("%Y-%m-%d %H:%M:%S")
-                    if hasattr(last_ts, "strftime")
-                    else str(last_ts)
-                )
-
-                last_vol: int | None = None
-                if not volume_series.empty:
-                    try:
-                        v = int(volume_series.iloc[-1])
-                        last_vol = v if math.isfinite(v) else None
-                    except (TypeError, ValueError):
-                        last_vol = None
-
-                out[key] = {
-                    "price": round(last_px, 2),
-                    "volume": last_vol,
-                    "as_of": as_of,
-                }
-            except Exception:
-                continue
-
-    # 분봉 데이터가 없는 종목은 fast_info로 fallback (장 마감 후 등)
-    missing = [t for t in tickers if t.upper() not in out]
-    for ticker in missing:
-        key = ticker.upper()
         try:
             fi = yf.Ticker(key).fast_info
             price = fi.get("lastPrice")
             if price is None or not math.isfinite(price):
                 continue
+            volume = fi.get("lastVolume")
+            vol_int: int | None = None
+            if volume is not None:
+                try:
+                    vol_int = int(volume) if math.isfinite(float(volume)) else None
+                except (TypeError, ValueError):
+                    vol_int = None
             out[key] = {
-                "price": round(price, 2),
-                "volume": None,
-                "as_of": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "price": round(float(price), 2),
+                "volume": vol_int,
+                "as_of": now_str,
             }
         except Exception:
             continue
