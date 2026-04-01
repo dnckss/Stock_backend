@@ -56,8 +56,12 @@ async def lifespan(app: FastAPI):
 
     try:
         from config import NEWS_FALLBACK_TICKERS
-        latest_cache["news_feed"] = await build_news_feed(NEWS_FALLBACK_TICKERS)
+        from services.news_feed import prefetch_news_articles
+        feed = await build_news_feed(NEWS_FALLBACK_TICKERS)
+        latest_cache["news_feed"] = feed
         latest_cache["updated_at"] = datetime.now().isoformat()
+        # 기동 시 본문 프리페치 시작
+        asyncio.create_task(prefetch_news_articles(feed))
     except Exception as e:
         logger.warning("기동 시 뉴스 수집 실패: %s", e, exc_info=True)
 

@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import logging
 from datetime import datetime
 from typing import Any
 
 import yfinance as yf
 
-from config import NEWS_FEED_MAX_ITEMS, NEWS_FEED_TTL_SEC
+from config import NEWS_FEED_MAX_ITEMS, NEWS_FEED_TTL_SEC, NEWS_CRAWL_MAX_CONCURRENT
 from services.finbert import analyze_batch
 from services.news_sentiment import normalize_to_polarity, polarity_to_ko
+
+logger = logging.getLogger(__name__)
 
 _cache: list[dict[str, Any]] = []
 _cache_at: datetime | None = None
@@ -186,3 +191,66 @@ async def build_stock_news_feed(ticker: str, limit: int = 10, refresh: bool = Fa
     result = deduped[:safe_limit]
     _stock_news_cache[upper] = (datetime.now(), result)
     return result
+
+
+# ---------------------------------------------------------------------------
+# 본문 프리페치: 뉴스 피드의 URL을 백그라운드에서 미리 크롤링하여 DB에 캐싱
+# ---------------------------------------------------------------------------
+
+def _hash_url(url: str) -> str:
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()
+
+
+async def prefetch_news_articles(feed: list[dict[str, Any]]) -> None:
+    """
+    뉴스 피드의 URL들을 백그라운드에서 크롤링하여 DB에 저장한다.
+    이미 캐시된 기사는 건너뛴다. 사용자가 상세보기를 눌렀을 때 즉시 응답할 수 있도록 한다.
+    """
+    from services.article_crawler import fetch_and_extract
+    from services.crud import get_cached_news_article, upsert_news_article
+
+    urls_to_fetch: list[dict[str, Any]] = []
+    for item in feed:
+        url = (item.get("url") or "").strip()
+        if not url:
+            continue
+        url_hash = _hash_url(url)
+        cached = get_cached_news_article(url_hash)
+        if cached:
+            continue
+        urls_to_fetch.append({"url": url, "url_hash": url_hash, "title": item.get("title"), "publisher": item.get("publisher"), "ticker": item.get("ticker")})
+
+    if not urls_to_fetch:
+        return
+
+    sem = asyncio.Semaphore(NEWS_CRAWL_MAX_CONCURRENT)
+
+    async def _crawl_one(entry: dict[str, Any]) -> None:
+        async with sem:
+            try:
+                crawled = await fetch_and_extract(entry["url"])
+                row = {
+                    "url_hash": entry["url_hash"],
+                    "url": entry["url"],
+                    "final_url": crawled.get("final_url") or entry["url"],
+                    "http_status": crawled.get("http_status"),
+                    "extraction_status": crawled.get("extraction_status"),
+                    "error_reason": crawled.get("error_reason"),
+                    "title": crawled.get("title") or entry.get("title"),
+                    "publisher": crawled.get("publisher") or entry.get("publisher"),
+                    "author": crawled.get("author"),
+                    "ticker": entry.get("ticker"),
+                    "timestamp": crawled.get("timestamp"),
+                    "canonical_url": crawled.get("canonical_url"),
+                    "article_text": crawled.get("article_text") or "",
+                    "article_markdown": crawled.get("article_markdown") or "",
+                    "media": crawled.get("media") or [],
+                    "domains": crawled.get("domains") or {"article": "", "media": []},
+                }
+                upsert_news_article(row)
+            except Exception as e:
+                logger.debug("프리페치 실패 (%s): %s", entry["url"][:60], e)
+
+    tasks = [_crawl_one(entry) for entry in urls_to_fetch]
+    await asyncio.gather(*tasks, return_exceptions=True)
+    logger.info("뉴스 본문 프리페치 완료: %d/%d건 처리", len(urls_to_fetch), len(feed))

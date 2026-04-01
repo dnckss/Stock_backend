@@ -189,6 +189,10 @@ async def run_news_feed_loop():
             latest_cache["updated_at"] = datetime.now().isoformat()
             await manager.broadcast({"type": "MARKET_UPDATE", **sanitize_for_json(latest_cache)})
             logger.info("뉴스 피드 갱신 완료: %d건", len(feed))
+
+            # 백그라운드 본문 프리페치 — 사용자 클릭 시 즉시 응답 가능하도록
+            from services.news_feed import prefetch_news_articles
+            asyncio.create_task(prefetch_news_articles(feed))
         except Exception as e:
             logger.exception("뉴스 피드 루프 에러: %s", e)
 
