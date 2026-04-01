@@ -98,7 +98,32 @@ CREATE INDEX IF NOT EXISTS idx_news_items_created ON news_items (created_at DESC
 ALTER TABLE news_items ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Allow all for anon" ON news_items FOR ALL USING (true) WITH CHECK (true);
 
--- 5. Row Level Security (RLS) 비활성화 (서버 사이드에서만 접근하므로)
+-- 5. strategy_history 테이블 (AI 전략 추천 이력)
+CREATE TABLE IF NOT EXISTS strategy_history (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ticker TEXT NOT NULL,
+    direction TEXT,
+    confidence TEXT,
+    strategy_type TEXT,
+    entry_low DOUBLE PRECISION,
+    entry_high DOUBLE PRECISION,
+    stop_loss DOUBLE PRECISION,
+    stop_loss_pct DOUBLE PRECISION,
+    target1_price DOUBLE PRECISION,
+    target2_price DOUBLE PRECISION,
+    risk_reward_ratio DOUBLE PRECISION,
+    rationale TEXT,
+    market_regime TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_ticker ON strategy_history (ticker);
+CREATE INDEX IF NOT EXISTS idx_strategy_created ON strategy_history (created_at DESC);
+
+ALTER TABLE strategy_history ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow all for anon" ON strategy_history FOR ALL USING (true) WITH CHECK (true);
+
+-- 6. Row Level Security (RLS) 비활성화 (서버 사이드에서만 접근하므로)
 -- 필요 시 Supabase 대시보드에서 RLS를 활성화하고 정책을 추가하세요.
 ALTER TABLE analysis_results ENABLE ROW LEVEL SECURITY;
 ALTER TABLE news_articles ENABLE ROW LEVEL SECURITY;

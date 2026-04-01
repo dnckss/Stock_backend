@@ -366,3 +366,44 @@ def mark_news_item_has_article(url_hash: str) -> None:
     """뉴스 아이템의 has_article을 True로 업데이트한다."""
     client = _get_client()
     client.table("news_items").update({"has_article": True}).eq("url_hash", url_hash).execute()
+
+
+# ---------------------------------------------------------------------------
+# Strategy History (전략 추천 이력)
+# ---------------------------------------------------------------------------
+
+def save_strategy_history(recommendations: list[dict], market_regime: str | None = None) -> None:
+    """AI 전략 추천 이력을 DB에 저장한다."""
+    if not recommendations:
+        return
+    client = _get_client()
+    rows = []
+    for rec in recommendations:
+        entry_zone = rec.get("entry_zone") or {}
+        targets = rec.get("targets") or []
+        rows.append({
+            "ticker": (rec.get("ticker") or "").upper(),
+            "direction": rec.get("direction"),
+            "confidence": rec.get("confidence"),
+            "strategy_type": rec.get("strategy_type"),
+            "entry_low": _safe_value(entry_zone.get("low")),
+            "entry_high": _safe_value(entry_zone.get("high")),
+            "stop_loss": _safe_value(rec.get("stop_loss")),
+            "stop_loss_pct": _safe_value(rec.get("stop_loss_pct")),
+            "target1_price": _safe_value(targets[0].get("price")) if len(targets) > 0 else None,
+            "target2_price": _safe_value(targets[1].get("price")) if len(targets) > 1 else None,
+            "risk_reward_ratio": _safe_value(rec.get("risk_reward_ratio")),
+            "rationale": rec.get("rationale"),
+            "market_regime": market_regime,
+        })
+    client.table("strategy_history").insert(rows).execute()
+
+
+def get_strategy_history(limit: int = 20, ticker: str | None = None) -> list[dict]:
+    """전략 추천 이력을 최신순으로 조회한다."""
+    client = _get_client()
+    query = client.table("strategy_history").select("*").order("created_at", desc=True).limit(limit)
+    if ticker:
+        query = query.eq("ticker", ticker.upper())
+    resp = query.execute()
+    return _sanitize(resp.data)
