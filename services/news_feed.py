@@ -133,10 +133,34 @@ async def build_news_feed(tickers: list[str]) -> list[dict[str, Any]]:
         if url:
             item["url_hash"] = _hash_url(url)
     try:
-        from services.crud import upsert_news_items
+        from services.crud import upsert_news_items, get_news_items
         upsert_news_items(feed)
+
+        # DB의 기존 뉴스와 합쳐서 최신순 정렬 — 티커 변동으로 뉴스가 사라지는 것 방지
+        db_items = get_news_items(limit=NEWS_FEED_MAX_ITEMS * 2)
+        seen_hashes: set[str] = {item.get("url_hash", "") for item in feed}
+        for db_item in db_items:
+            h = db_item.get("url_hash", "")
+            if h and h not in seen_hashes:
+                seen_hashes.add(h)
+                feed.append({
+                    "title": db_item.get("title", ""),
+                    "publisher": db_item.get("publisher", ""),
+                    "timestamp": db_item.get("timestamp", 0),
+                    "ticker": db_item.get("ticker"),
+                    "url": db_item.get("url", ""),
+                    "url_hash": h,
+                    "score": db_item.get("sentiment_score", 0.0),
+                    "sentiment_label": db_item.get("sentiment_label", "neutral"),
+                    "sentiment_polarity": db_item.get("sentiment_polarity", "neutral"),
+                    "sentiment_ko": db_item.get("sentiment_ko", "중립"),
+                    "confidence": db_item.get("confidence", 0.0),
+                    "has_article": db_item.get("has_article", False),
+                })
+        feed.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+        feed = feed[:NEWS_FEED_MAX_ITEMS]
     except Exception as e:
-        logger.warning("뉴스 피드 DB 저장 실패: %s", e)
+        logger.warning("뉴스 피드 DB 저장/병합 실패: %s", e)
 
     _cache = feed
     _cache_at = datetime.now()
