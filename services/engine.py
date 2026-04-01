@@ -147,7 +147,7 @@ async def run_price_tick_loop():
                 latest_cache["quote_tick_at"] = datetime.now().isoformat()
                 latest_cache["updated_at"] = datetime.now().isoformat()
                 await manager.broadcast({"type": "MARKET_UPDATE", **sanitize_for_json(latest_cache)})
-                logger.debug("분봉 시세 갱신 완료 (%s/%s 심볼)", len(live), len(tickers))
+                logger.info("분봉 시세 갱신 완료 (%s/%s 심볼)", len(live), len(tickers))
         except asyncio.CancelledError:
             raise
         except Exception as e:

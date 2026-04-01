@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+from datetime import datetime
 from io import StringIO
 
 import pandas as pd
@@ -239,6 +240,23 @@ def refresh_intraday_prices(tickers: list[str]) -> dict[str, dict]:
                 }
             except Exception:
                 continue
+
+    # 분봉 데이터가 없는 종목은 fast_info로 fallback (장 마감 후 등)
+    missing = [t for t in tickers if t.upper() not in out]
+    for ticker in missing:
+        key = ticker.upper()
+        try:
+            fi = yf.Ticker(key).fast_info
+            price = fi.get("lastPrice")
+            if price is None or not math.isfinite(price):
+                continue
+            out[key] = {
+                "price": round(price, 2),
+                "volume": None,
+                "as_of": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        except Exception:
+            continue
 
     return out
 
