@@ -306,17 +306,13 @@ def upsert_economic_events(events: list[dict]) -> None:
     ).execute()
 
 
-def get_economic_events(date_from: str, limit: int = 50) -> list[dict]:
-    """date_from(YYYY-MM-DD) 이후의 경제 일정을 시간순으로 조회한다."""
+def get_economic_events(date_from: str | None = None, limit: int = 500) -> list[dict]:
+    """경제 일정을 시간순으로 조회한다. date_from이 None이면 전체 조회."""
     client = _get_client()
-    resp = (
-        client.table("economic_events")
-        .select("*")
-        .gte("event_date", date_from)
-        .order("event_at", desc=False)
-        .limit(limit)
-        .execute()
-    )
+    query = client.table("economic_events").select("*").order("event_at", desc=False).limit(limit)
+    if date_from:
+        query = query.gte("event_date", date_from)
+    resp = query.execute()
     return _sanitize(resp.data)
 
 

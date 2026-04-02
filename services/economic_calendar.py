@@ -354,9 +354,8 @@ async def fetch_economic_calendar(
         # 1) 크롤링 → DB 저장
         await _fetch_and_save()
 
-        # 2) DB에서 오늘부터 시간순으로 조회
-        today_str = datetime.now(_KST).strftime("%Y-%m-%d")
-        db_rows = get_economic_events(date_from=today_str, limit=safe_limit)
+        # 2) DB에서 전체 시간순으로 조회 (과거 일정 포함)
+        db_rows = get_economic_events(date_from=None, limit=safe_limit)
         items = [_to_response_item(r) for r in db_rows]
 
         _cache = items
@@ -375,8 +374,7 @@ async def fetch_economic_calendar(
 
         # 크롤링 실패 시 DB fallback
         try:
-            today_str = datetime.now(_KST).strftime("%Y-%m-%d")
-            db_rows = get_economic_events(date_from=today_str, limit=safe_limit)
+            db_rows = get_economic_events(date_from=None, limit=safe_limit)
             if db_rows:
                 items = [_to_response_item(r) for r in db_rows]
                 return {
