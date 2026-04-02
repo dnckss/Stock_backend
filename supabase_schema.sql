@@ -123,7 +123,18 @@ CREATE INDEX IF NOT EXISTS idx_strategy_created ON strategy_history (created_at 
 ALTER TABLE strategy_history ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Allow all for anon" ON strategy_history FOR ALL USING (true) WITH CHECK (true);
 
--- 6. Row Level Security (RLS) 비활성화 (서버 사이드에서만 접근하므로)
+-- 6. econ_event_details 테이블 (경제 지표 상세 정보 캐시)
+CREATE TABLE IF NOT EXISTS econ_event_details (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    event_name TEXT NOT NULL UNIQUE,
+    detail_json TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE econ_event_details ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow all for anon" ON econ_event_details FOR ALL USING (true) WITH CHECK (true);
+
+-- 7. Row Level Security (RLS) 비활성화 (서버 사이드에서만 접근하므로)
 -- 필요 시 Supabase 대시보드에서 RLS를 활성화하고 정책을 추가하세요.
 ALTER TABLE analysis_results ENABLE ROW LEVEL SECURITY;
 ALTER TABLE news_articles ENABLE ROW LEVEL SECURITY;

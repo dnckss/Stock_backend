@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException
 from services.crud import get_news_items, sanitize_for_json
 from services.news_article import get_news_article
 from services.economic_calendar import fetch_economic_calendar
+from services.econ_detail import get_econ_event_detail
 
 router = APIRouter(prefix="/api", tags=["News"])
 
@@ -38,4 +39,41 @@ async def api_economic_calendar(refresh: int = 0):
     - refresh=1: 캐시 무시 후 재수집
     """
     return await fetch_economic_calendar(refresh=bool(refresh))
+
+
+@router.get("/economic-calendar/detail")
+async def api_econ_event_detail(
+    event: str,
+    country: str | None = None,
+    currency: str | None = None,
+    importance: int | None = None,
+    actual: str | None = None,
+    forecast: str | None = None,
+    previous: str | None = None,
+):
+    """
+    경제 이벤트 상세 정보 조회.
+    - event: 이벤트 영문명 (필수)
+    - 나머지: 부가 컨텍스트 (선택)
+
+    첫 호출 시 AI 생성 (30~60초), 이후 DB 캐시 히트로 즉시 응답.
+    """
+    if not event or not event.strip():
+        raise HTTPException(status_code=400, detail="event 파라미터가 필요합니다.")
+
+    event_data = {}
+    if country:
+        event_data["country_name"] = country
+    if currency:
+        event_data["currency"] = currency
+    if importance is not None:
+        event_data["importance"] = importance
+    if actual:
+        event_data["actual"] = actual
+    if forecast:
+        event_data["forecast"] = forecast
+    if previous:
+        event_data["previous"] = previous
+
+    return await get_econ_event_detail(event.strip(), event_data or None)
 
