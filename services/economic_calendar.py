@@ -334,16 +334,14 @@ async def _fetch_and_save() -> list[dict[str, Any]]:
 
 
 async def fetch_economic_calendar(
-    refresh: bool = False, limit: int = ECON_CALENDAR_MAX_ITEMS
+    refresh: bool = False,
 ) -> dict[str, Any]:
     global _cache, _cache_at
-
-    safe_limit = max(1, min(int(limit), ECON_CALENDAR_MAX_ITEMS))
 
     if not refresh and _is_fresh():
         return {
             "source": "myfxbook",
-            "items": _cache[:safe_limit],
+            "items": _cache,
             "fetched_at": _cache_at.isoformat() if _cache_at else None,
             "cache_hit": True,
             "cache_ttl_sec": ECON_CALENDAR_TTL_SEC,
@@ -354,8 +352,8 @@ async def fetch_economic_calendar(
         # 1) 크롤링 → DB 저장
         await _fetch_and_save()
 
-        # 2) DB에서 전체 시간순으로 조회 (과거 일정 포함)
-        db_rows = get_economic_events(date_from=None, limit=safe_limit)
+        # 2) DB에서 전체 조회 (과거 포함, 제한 없음)
+        db_rows = get_economic_events()
         items = [_to_response_item(r) for r in db_rows]
 
         _cache = items
@@ -363,7 +361,7 @@ async def fetch_economic_calendar(
 
         return {
             "source": "myfxbook",
-            "items": _cache[:safe_limit],
+            "items": _cache,
             "fetched_at": _cache_at.isoformat(),
             "cache_hit": False,
             "cache_ttl_sec": ECON_CALENDAR_TTL_SEC,
@@ -374,7 +372,7 @@ async def fetch_economic_calendar(
 
         # 크롤링 실패 시 DB fallback
         try:
-            db_rows = get_economic_events(date_from=None, limit=safe_limit)
+            db_rows = get_economic_events()
             if db_rows:
                 items = [_to_response_item(r) for r in db_rows]
                 return {

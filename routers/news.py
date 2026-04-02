@@ -31,13 +31,11 @@ async def api_news_detail(url: str, refresh: int = 0, analyze: int = 1):
 
 
 @router.get("/economic-calendar")
-async def api_economic_calendar(refresh: int = 0, limit: int = 500):
+async def api_economic_calendar(refresh: int = 0):
     """
     경제 일정 캘린더 조회(myfxbook 크롤링 + TTL 캐시).
+    DB에 저장된 모든 일정을 시간순으로 반환한다.
     - refresh=1: 캐시 무시 후 재수집
-    - limit: 반환 이벤트 개수(최대 config.ECON_CALENDAR_MAX_ITEMS)
     """
-    if limit < 1:
-        raise HTTPException(status_code=400, detail="limit은 1 이상이어야 합니다.")
-    return await fetch_economic_calendar(refresh=bool(refresh), limit=limit)
+    return await fetch_economic_calendar(refresh=bool(refresh))
 
