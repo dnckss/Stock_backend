@@ -6,6 +6,8 @@ from fastapi import APIRouter, HTTPException
 from services.crud import get_latest_report, get_history, sanitize_for_json
 from services.news_feed import build_stock_news_feed
 from services.stock_detail import fetch_quote, fetch_chart, format_market_cap
+from services.stock_analysis import analyze_stock
+from services.technicals import compute_technicals
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["Stock"])
@@ -44,6 +46,33 @@ async def api_stock_quote(ticker: str):
         **quote,
         "market_cap_display": format_market_cap(quote.get("market_cap")),
     })
+
+
+@router.get("/stock/{ticker}/analysis")
+async def api_stock_analysis(ticker: str):
+    """
+    종목별 AI 심층 분석.
+    뉴스·기술적 지표·가격 변동을 종합하여 원인 분석, 반등 가능성, 전략을 제공한다.
+    """
+    upper = ticker.upper()
+
+    # 병렬: 시세 + 기술적 지표 + 뉴스
+    quote_task = asyncio.to_thread(fetch_quote, upper)
+    tech_task = asyncio.to_thread(compute_technicals, upper)
+    news_task = build_stock_news_feed(upper, limit=10, refresh=True)
+
+    try:
+        quote, technicals, stock_news = await asyncio.gather(quote_task, tech_task, news_task)
+    except Exception as e:
+        logger.exception("종목 분석 데이터 수집 실패 (%s): %s", upper, e)
+        raise HTTPException(status_code=500, detail=f"데이터 수집 실패: {e}")
+
+    result = await analyze_stock(upper, quote, technicals, stock_news)
+
+    if result.get("error"):
+        return sanitize_for_json({"ticker": upper, "analysis": None, "error": result["error"]})
+
+    return sanitize_for_json({"ticker": upper, "analysis": result})
 
 
 @router.get("/stock/{ticker}")
