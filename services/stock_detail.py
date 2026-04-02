@@ -18,15 +18,15 @@ logger = logging.getLogger(__name__)
 # key = 프론트가 보내는 값, value = (yfinance period, yfinance interval)
 _CHART_PRESETS: dict[str, tuple[str, str]] = {
     # 분봉
-    "1m": ("7d", "1m"),       # 1분봉 — 최대 7일
-    "5m": ("60d", "5m"),      # 5분봉 — 최대 60일
-    "30m": ("60d", "30m"),    # 30분봉 — 최대 60일
-    "60m": ("60d", "60m"),    # 60분봉 — 최대 60일
+    "1min": ("7d", "1m"),        # 1분봉 — 최대 7일
+    "5min": ("60d", "5m"),       # 5분봉 — 최대 60일
+    "30min": ("60d", "30m"),     # 30분봉 — 최대 60일
+    "60min": ("60d", "60m"),     # 60분봉 — 최대 60일
     # 일봉 이상
-    "1D": ("1y", "1d"),       # 일봉 — 1년
-    "1W": ("5y", "1wk"),      # 주봉 — 5년
-    "1M": ("10y", "1mo"),     # 월봉 — 10년
-    "1Y": ("max", "3mo"),     # 년봉(분기) — 전체
+    "day": ("1y", "1d"),         # 일봉 — 1년
+    "week": ("5y", "1wk"),       # 주봉 — 5년
+    "month": ("10y", "1mo"),     # 월봉 — 10년
+    "year": ("max", "3mo"),      # 년봉(분기) — 전체
 }
 
 
@@ -110,10 +110,10 @@ def fetch_quote(ticker: str) -> dict[str, Any]:
 
 def fetch_chart(ticker: str, period: str = "1D") -> list[dict[str, Any]]:
     """차트 데이터(OHLCV)를 가져온다."""
-    # 분봉(1m, 5m 등)은 소문자, 일봉 이상(1D, 1W 등)은 대문자
-    preset = _CHART_PRESETS.get(period) or _CHART_PRESETS.get(period.upper()) or _CHART_PRESETS.get(period.lower())
+    key = period.lower().strip()
+    preset = _CHART_PRESETS.get(key)
     if not preset:
-        preset = _CHART_PRESETS["1D"]
+        preset = _CHART_PRESETS["day"]
 
     yf_period, yf_interval = preset
     try:

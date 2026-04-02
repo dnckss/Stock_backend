@@ -14,7 +14,7 @@ router = APIRouter(prefix="/api", tags=["Stock"])
 # 구체적 경로를 먼저 등록 (FastAPI는 선언 순서로 매칭)
 
 @router.get("/stock/{ticker}/chart")
-async def api_stock_chart(ticker: str, period: str = "1M"):
+async def api_stock_chart(ticker: str, period: str = "day"):
     """
     차트 데이터만 별도 조회 (기간 전환 시 사용).
     period: 1D / 5D / 1M / 3M / 6M / 1Y / 5Y
@@ -49,7 +49,7 @@ async def api_stock_quote(ticker: str):
 @router.get("/stock/{ticker}")
 async def api_stock_detail(
     ticker: str,
-    chart_period: str = "1M",
+    chart_period: str = "day",
     news_limit: int = 10,
     news_refresh: int = 0,
 ):
