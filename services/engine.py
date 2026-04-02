@@ -63,7 +63,14 @@ async def run_analysis_loop():
             earned_count = sum(1 for e in earnings if e is not None)
             logger.info("실적 서프라이즈: %s/%s개 확보", earned_count, len(ticker_list))
 
-            candidates = compute_signals(candidates, sentiments, earnings)
+            # 기술적 지표 계산 (상위 종목)
+            from services.technicals import compute_technicals_batch
+            tech_tickers = ticker_list[:30]  # 상위 30종목만
+            logger.info("기술적 지표 계산 시작 (%s개)...", len(tech_tickers))
+            technicals = await asyncio.to_thread(compute_technicals_batch, tech_tickers)
+            logger.info("기술적 지표: %s/%s개 확보", len(technicals), len(tech_tickers))
+
+            candidates = compute_signals(candidates, sentiments, earnings, technicals)
             await asyncio.to_thread(save_candidates, candidates)
 
             latest_cache["news_feed"] = await build_news_feed(ticker_list)

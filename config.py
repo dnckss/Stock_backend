@@ -62,12 +62,19 @@ STRATEGIST_ECON_MIN_IMPORTANCE = int(os.getenv("STRATEGIST_ECON_MIN_IMPORTANCE",
 STRATEGIST_ECON_MAX_UPCOMING = int(os.getenv("STRATEGIST_ECON_MAX_UPCOMING", "10"))
 STRATEGIST_ECON_MAX_SURPRISES = int(os.getenv("STRATEGIST_ECON_MAX_SURPRISES", "5"))
 
-# Signal thresholds (감성 괴리 fallback용)
-BUY_THRESHOLD = 0.25
-SELL_THRESHOLD = -0.25
+# Composite Signal (다중 팩터 복합 스코어)
+# 최종 composite_score 기준 시그널 문턱 (-1 ~ +1 스케일)
+SIGNAL_BUY_THRESHOLD = float(os.getenv("SIGNAL_BUY_THRESHOLD", "0.25"))
+SIGNAL_SELL_THRESHOLD = float(os.getenv("SIGNAL_SELL_THRESHOLD", "-0.25"))
+# 각 팩터 가중치 (합계 = 1.0)
+SIGNAL_WEIGHT_SENTIMENT = float(os.getenv("SIGNAL_WEIGHT_SENTIMENT", "0.25"))
+SIGNAL_WEIGHT_EARNINGS = float(os.getenv("SIGNAL_WEIGHT_EARNINGS", "0.30"))
+SIGNAL_WEIGHT_MOMENTUM = float(os.getenv("SIGNAL_WEIGHT_MOMENTUM", "0.25"))
+SIGNAL_WEIGHT_VOLUME = float(os.getenv("SIGNAL_WEIGHT_VOLUME", "0.20"))
 
-# Earnings Surprise 시그널 문턱
-# surprisePercent: (실제 EPS - 예상 EPS) / |예상 EPS|, 소수 (0.05 = 5%)
+# 레거시 호환 (analyst에서 사용)
+BUY_THRESHOLD = SIGNAL_BUY_THRESHOLD
+SELL_THRESHOLD = SIGNAL_SELL_THRESHOLD
 EARNINGS_BUY_PCT = 0.05
 EARNINGS_SELL_PCT = -0.05
 # Yahoo quoteSummary 연속 호출 완화(초). 0이면 대기 없음.
