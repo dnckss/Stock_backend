@@ -37,7 +37,11 @@ from services.crud import get_economic_events, get_latest_scan_records, sanitize
 
 logger = logging.getLogger(__name__)
 
-_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+_client = OpenAI(
+    api_key=OPENAI_API_KEY,
+    max_retries=1,              # 재시도 1회로 제한 (기본 2회 → 총 3번 시도 방지)
+    timeout=180,                # httpx 타임아웃 180초 (gpt-5 긴 JSON 응답 대기)
+) if OPENAI_API_KEY else None
 
 _KST = timezone(timedelta(hours=9))
 
@@ -464,7 +468,6 @@ async def _call_openai_strategy(
                 {"role": "user", "content": json.dumps(user_content, ensure_ascii=False)},
             ],
             "response_format": {"type": "json_object"},
-            "timeout": STRATEGIST_OPENAI_TIMEOUT_SEC,
         }
         # gpt-5 등 temperature 미지원 모델 분기
         model_lower = (STRATEGIST_OPENAI_MODEL or "").lower()
@@ -475,7 +478,7 @@ async def _call_openai_strategy(
     try:
         resp = await asyncio.wait_for(
             asyncio.to_thread(_create),
-            timeout=STRATEGIST_OPENAI_TIMEOUT_SEC + STRATEGIST_OPENAI_THREAD_BUFFER_SEC,
+            timeout=200,  # 클라이언트 180초 + 여유 20초
         )
     except asyncio.TimeoutError as e:
         raise TimeoutError("OpenAI 전략가 호출 타임아웃") from e
