@@ -111,6 +111,13 @@ def fetch_quote(ticker: str) -> dict[str, Any]:
 def fetch_chart(ticker: str, period: str = "1D") -> list[dict[str, Any]]:
     """차트 데이터(OHLCV)를 가져온다."""
     key = period.lower().strip()
+    # 축약 키 호환 매핑 (프론트에서 1m, 5m 등으로 보낼 수 있음)
+    _ALIAS: dict[str, str] = {
+        "1m": "1min", "5m": "5min", "30m": "30min", "60m": "60min",
+        "1d": "day", "1w": "week", "1mo": "month", "1y": "year",
+        "5d": "day", "3m": "day", "6m": "day", "5y": "week",
+    }
+    key = _ALIAS.get(key, key)
     preset = _CHART_PRESETS.get(key)
     if not preset:
         preset = _CHART_PRESETS["day"]
