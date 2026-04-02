@@ -173,3 +173,26 @@ STRATEGIST_TICKER_SECTOR_MAP: dict[str, str] = {
 # VIX를 MIN_VIX~MAX_VIX로 클램프 후 로그 스케일로 0~100으로 변환
 MIN_VIX = 10.0
 MAX_VIX = 80.0
+
+# ---------------------------------------------------------------------------
+# Multi-Agent Portfolio Builder (SSE 스트리밍 + CoT)
+# ---------------------------------------------------------------------------
+PORTFOLIO_AGENT_MODEL = os.getenv("PORTFOLIO_AGENT_MODEL", "gpt-5")
+PORTFOLIO_AGENT_TIMEOUT_SEC = int(os.getenv("PORTFOLIO_AGENT_TIMEOUT_SEC", "600"))
+
+# Monte Carlo 시뮬레이션
+MONTE_CARLO_SIMULATIONS = int(os.getenv("MONTE_CARLO_SIMULATIONS", "10000"))
+MONTE_CARLO_DAYS = int(os.getenv("MONTE_CARLO_DAYS", "252"))  # 1년 거래일
+
+# VaR (Value at Risk)
+VAR_CONFIDENCE_LEVELS = [0.95, 0.99]  # 95%, 99%
+
+# 시나리오 시뮬레이션
+SCENARIO_RATE_CHANGE_BPS = [25, 50, 100]  # 금리 변동 시나리오 (bp)
+SCENARIO_MARKET_SHOCK_PCT = [-0.10, -0.20, -0.30]  # 시장 충격 시나리오
+
+# 히스토리 데이터 기간 (상관관계 / 변동성 계산용)
+RISK_HISTORY_PERIOD = os.getenv("RISK_HISTORY_PERIOD", "1y")
+
+# XAI 에이전트 온도 (설명 품질용 — 약간 높게)
+XAI_AGENT_TEMPERATURE = float(os.getenv("XAI_AGENT_TEMPERATURE", "0.4"))

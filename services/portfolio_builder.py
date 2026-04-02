@@ -18,6 +18,7 @@ from config import (
     STRATEGIST_OPENAI_MODEL,
 )
 from services.crud import sanitize_for_json
+from services.portfolio_agents import STYLE_CONFIG, PERIOD_CONFIG, _DEFENSIVE_ETFS
 from services.stock_detail import fetch_quote
 
 logger = logging.getLogger(__name__)
@@ -28,40 +29,9 @@ _client = OpenAI(
     timeout=600,
 ) if OPENAI_API_KEY else None
 
-# 투자 성향별 설정
-_STYLE_CONFIG = {
-    "aggressive": {
-        "label_ko": "공격적",
-        "top_concentration": 0.75,   # 상위 종목 집중도
-        "max_picks": 3,
-        "defensive_pct": 0.0,        # 방어주/ETF 비중
-        "cash_reserve_pct": 0.03,    # 현금 보유 비율
-    },
-    "balanced": {
-        "label_ko": "균형",
-        "top_concentration": 0.60,
-        "max_picks": 5,
-        "defensive_pct": 0.20,
-        "cash_reserve_pct": 0.08,
-    },
-    "conservative": {
-        "label_ko": "보수적",
-        "top_concentration": 0.40,
-        "max_picks": 7,
-        "defensive_pct": 0.40,
-        "cash_reserve_pct": 0.15,
-    },
-}
-
-# 투자 기간별 설정
-_PERIOD_CONFIG = {
-    "short": {"label_ko": "단기 (1~2주)", "strategy_type": "swing", "dca_splits": 1},
-    "medium": {"label_ko": "중기 (1~3개월)", "strategy_type": "position", "dca_splits": 2},
-    "long": {"label_ko": "장기 (6개월+)", "strategy_type": "position", "dca_splits": 3},
-}
-
-# 방어주 ETF 후보
-_DEFENSIVE_ETFS = ["XLV", "XLU", "XLP", "GLD", "TLT", "VIG"]
+# 단일 소스: portfolio_agents.py에서 import
+_STYLE_CONFIG = STYLE_CONFIG
+_PERIOD_CONFIG = PERIOD_CONFIG
 
 _SYSTEM_PROMPT = """\
 너는 월스트리트 최고 등급의 포트폴리오 매니저야.
