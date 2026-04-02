@@ -14,6 +14,9 @@ import yfinance as yf
 
 logger = logging.getLogger(__name__)
 
+# 회사명 프로세스 내 캐시 (info 호출 실패 시 매번 재시도 방지)
+_company_info_cache: dict[str, dict[str, Any]] = {}
+
 # 차트 인터벌별 기간/yfinance 인터벌 매핑
 # key = 프론트가 보내는 값, value = (yfinance period, yfinance interval)
 _CHART_PRESETS: dict[str, tuple[str, str]] = {
@@ -53,11 +56,18 @@ def fetch_quote(ticker: str) -> dict[str, Any]:
     t = yf.Ticker(ticker)
 
     fi = t.fast_info
-    info = {}
-    try:
-        info = t.info or {}
-    except Exception:
-        pass
+
+    # 회사 정보 캐시 활용 (info 호출은 느리고 실패할 수 있음)
+    if ticker in _company_info_cache:
+        info = _company_info_cache[ticker]
+    else:
+        info = {}
+        try:
+            info = t.info or {}
+            if info.get("longName") or info.get("shortName"):
+                _company_info_cache[ticker] = info
+        except Exception:
+            pass
 
     price = _safe(fi.get("lastPrice"))
     prev_close = _safe(fi.get("previousClose"))
