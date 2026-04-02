@@ -11,66 +11,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["Stock"])
 
 
-@router.get("/stock/{ticker}")
-async def api_stock_detail(
-    ticker: str,
-    chart_period: str = "1M",
-    news_limit: int = 10,
-    news_refresh: int = 0,
-):
-    """
-    종목 상세 페이지.
-    - quote: 실시간 시세 + 기업정보 + 호가
-    - chart: OHLCV 차트 데이터 (기간: 1D/5D/1M/3M/6M/1Y/5Y)
-    - news: 관련 뉴스
-    - analysis: AI 분석 리포트 + 히스토리
-    """
-    upper = ticker.upper()
-
-    # 병렬 실행: 시세 + 차트 + 뉴스 + AI 리포트
-    quote_task = asyncio.to_thread(fetch_quote, upper)
-    chart_task = asyncio.to_thread(fetch_chart, upper, chart_period)
-    news_task = build_stock_news_feed(upper, limit=news_limit, refresh=bool(news_refresh))
-
-    try:
-        quote, chart, stock_news = await asyncio.gather(quote_task, chart_task, news_task)
-    except Exception as e:
-        logger.exception("종목 상세 조회 실패 (%s): %s", upper, e)
-        raise HTTPException(status_code=500, detail=f"데이터 조회 실패: {e}")
-
-    # AI 분석 (동기 DB 호출이므로 별도)
-    latest = get_latest_report(upper)
-    history = get_history(upper, days=30)
-
-    if not quote.get("price") and not chart and not stock_news:
-        raise HTTPException(status_code=404, detail=f"{upper} 데이터 없음")
-
-    return sanitize_for_json({
-        "ticker": upper,
-
-        # 실시간 시세
-        "quote": {
-            **quote,
-            "market_cap_display": format_market_cap(quote.get("market_cap")),
-        },
-
-        # 차트 데이터
-        "chart": {
-            "period": chart_period.upper(),
-            "bars": chart,
-            "count": len(chart),
-        },
-
-        # 관련 뉴스
-        "news": stock_news,
-
-        # AI 분석
-        "analysis": {
-            "latest_report": latest,
-            "history": history,
-        },
-    })
-
+# 구체적 경로를 먼저 등록 (FastAPI는 선언 순서로 매칭)
 
 @router.get("/stock/{ticker}/chart")
 async def api_stock_chart(ticker: str, period: str = "1M"):
@@ -102,4 +43,57 @@ async def api_stock_quote(ticker: str):
         "ticker": upper,
         **quote,
         "market_cap_display": format_market_cap(quote.get("market_cap")),
+    })
+
+
+@router.get("/stock/{ticker}")
+async def api_stock_detail(
+    ticker: str,
+    chart_period: str = "1M",
+    news_limit: int = 10,
+    news_refresh: int = 0,
+):
+    """
+    종목 상세 페이지.
+    - quote: 실시간 시세 + 기업정보 + 호가
+    - chart: OHLCV 차트 데이터 (기간: 1D/5D/1M/3M/6M/1Y/5Y)
+    - news: 관련 뉴스
+    - analysis: AI 분석 리포트 + 히스토리
+    """
+    upper = ticker.upper()
+
+    # 병렬 실행: 시세 + 차트 + 뉴스
+    quote_task = asyncio.to_thread(fetch_quote, upper)
+    chart_task = asyncio.to_thread(fetch_chart, upper, chart_period)
+    news_task = build_stock_news_feed(upper, limit=news_limit, refresh=bool(news_refresh))
+
+    try:
+        quote, chart, stock_news = await asyncio.gather(quote_task, chart_task, news_task)
+    except Exception as e:
+        logger.exception("종목 상세 조회 실패 (%s): %s", upper, e)
+        raise HTTPException(status_code=500, detail=f"데이터 조회 실패: {e}")
+
+    # AI 분석 (동기 DB 호출)
+    latest = get_latest_report(upper)
+    history = get_history(upper, days=30)
+
+    if not quote.get("price") and not chart and not stock_news:
+        raise HTTPException(status_code=404, detail=f"{upper} 데이터 없음")
+
+    return sanitize_for_json({
+        "ticker": upper,
+        "quote": {
+            **quote,
+            "market_cap_display": format_market_cap(quote.get("market_cap")),
+        },
+        "chart": {
+            "period": chart_period.upper(),
+            "bars": chart,
+            "count": len(chart),
+        },
+        "news": stock_news,
+        "analysis": {
+            "latest_report": latest,
+            "history": history,
+        },
     })
