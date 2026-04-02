@@ -99,7 +99,7 @@ async def api_portfolio_stream(
 
     return StreamingResponse(
         _generate(),
-        media_type="text/event-stream",
+        media_type="text/event-stream; charset=utf-8",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",

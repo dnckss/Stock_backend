@@ -52,6 +52,20 @@ def _sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {payload}\n\n"
 
 
+def _parse_agent_result(event: str, agent_name: str) -> dict[str, Any] | None:
+    """SSE 이벤트 문자열에서 특정 에이전트의 agent_result 데이터를 추출한다."""
+    if not event.startswith("event: agent_result\n"):
+        return None
+    try:
+        _, payload = event.split("data: ", 1)
+        parsed = json.loads(payload.strip())
+        if parsed.get("agent") == agent_name:
+            return parsed.get("data") or {}
+    except Exception:
+        pass
+    return None
+
+
 # ---------------------------------------------------------------------------
 # 투자 성향·기간 설정 (portfolio_builder.py와 동일 — 단일 소스)
 # ---------------------------------------------------------------------------
@@ -923,13 +937,9 @@ async def stream_portfolio_build(
     analyst_data: dict[str, Any] = {}
     async for event in _run_analyst_agent(strategy_data, style_cfg, excludes):
         yield event
-        # agent_result에서 데이터 추출
-        if '"agent_result"' in event and '"analyst"' in event:
-            try:
-                _, payload = event.split("data: ", 1)
-                analyst_data = json.loads(payload.strip()).get("data", {})
-            except Exception:
-                pass
+        result = _parse_agent_result(event, "analyst")
+        if result is not None:
+            analyst_data = result
 
     candidate_quotes = analyst_data.get("candidate_quotes") or []
     if not candidate_quotes:
@@ -945,12 +955,9 @@ async def stream_portfolio_build(
     candidate_tickers = [q["ticker"] for q in candidate_quotes]
     async for event in _run_researcher_agent(strategy_data, candidate_tickers):
         yield event
-        if '"agent_result"' in event and '"researcher"' in event:
-            try:
-                _, payload = event.split("data: ", 1)
-                researcher_data = json.loads(payload.strip()).get("data", {})
-            except Exception:
-                pass
+        result = _parse_agent_result(event, "researcher")
+        if result is not None:
+            researcher_data = result
 
     # === Agent 3: Risk ===
     # 사전 비중 추정 (균등 배분)
@@ -962,12 +969,9 @@ async def stream_portfolio_build(
     risk_data: dict[str, Any] = {}
     async for event in _run_risk_agent(candidate_quotes, weights_estimate, budget):
         yield event
-        if '"agent_result"' in event and '"risk"' in event:
-            try:
-                _, payload = event.split("data: ", 1)
-                risk_data = json.loads(payload.strip()).get("data", {})
-            except Exception:
-                pass
+        result = _parse_agent_result(event, "risk")
+        if result is not None:
+            risk_data = result
 
     # === Agent 4: Portfolio Strategist (CoT 스트리밍) ===
     portfolio_data: dict[str, Any] = {}
@@ -975,12 +979,9 @@ async def stream_portfolio_build(
         budget, style, period, analyst_data, researcher_data, risk_data,
     ):
         yield event
-        if '"agent_result"' in event and '"portfolio"' in event:
-            try:
-                _, payload = event.split("data: ", 1)
-                portfolio_data = json.loads(payload.strip()).get("data", {})
-            except Exception:
-                pass
+        result = _parse_agent_result(event, "portfolio")
+        if result is not None:
+            portfolio_data = result
 
     # === Agent 5: XAI Briefer (CoT 스트리밍) ===
     xai_data: dict[str, Any] = {}
@@ -988,12 +989,9 @@ async def stream_portfolio_build(
         portfolio_data, analyst_data, researcher_data, risk_data, budget,
     ):
         yield event
-        if '"agent_result"' in event and '"xai"' in event:
-            try:
-                _, payload = event.split("data: ", 1)
-                xai_data = json.loads(payload.strip()).get("data", {})
-            except Exception:
-                pass
+        result = _parse_agent_result(event, "xai")
+        if result is not None:
+            xai_data = result
 
     # === 최종 결과 조립 ===
     allocations = portfolio_data.get("allocations") or []
