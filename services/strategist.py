@@ -64,8 +64,8 @@ _SYSTEM_PROMPT = """\
 ## 분석 규칙
 - **market_regime**: 매크로 지표 + VIX + 섹터 ETF 흐름을 종합하여 시장 국면을 판단해.
 - **news_themes**: 뉴스에서 시장을 움직이는 핵심 테마 2~4개를 도출해.
-- **econ_analysis**: 경제 서프라이즈의 시장 영향 + 다가오는 리스크 이벤트를 분석해.
-- **recommendations**: 3~5개 종목을 추천하되 반드시 아래 규칙을 지켜:
+- **econ_impact**: 경제 서프라이즈의 시장 영향 + 다가오는 리스크 이벤트를 3~4문장으로 요약해.
+- **recommendations**: 정확히 3개 종목을 추천하되 반드시 아래 규칙을 지켜:
   - 각 종목에 **direction**(BUY/SELL), **confidence**(high/medium/low) 명시
   - **strategy_type**: scalp(당일) / swing(1~2주) / position(1개월+) 중 선택
   - **entry_zone**: 진입 가격대 (low ~ high)
@@ -84,20 +84,12 @@ _SYSTEM_PROMPT = """\
 {
   "market_regime": "bullish|bearish|sideways|volatile",
   "market_regime_detail": "시장 국면 판단 근거 1~2문장",
-  "market_summary": "시장 전체 상황 요약 3~5문장 (뉴스·경제·기술적 통합 분석)",
+  "market_summary": "시장 전체 상황 요약 2~3문장",
   "top_sector": {"name": "섹터명", "name_ko": "한국어 섹터명", "reason": "선택 이유 (뉴스/경제/기술적 근거)"},
   "news_themes": [
     {"theme": "테마명", "tickers": ["NVDA"], "sentiment": "positive|negative|neutral", "detail": "설명"}
   ],
-  "econ_analysis": {
-    "summary": "경제 이벤트 영향 분석 2~3문장",
-    "recent_surprises": [
-      {"event": "이벤트명", "actual": "값", "forecast": "값", "impact": "시장 영향 설명"}
-    ],
-    "upcoming_risks": [
-      {"event": "이벤트명", "date": "YYYY-MM-DD", "risk_level": "high|medium|low", "scenario": "시나리오 설명"}
-    ]
-  },
+  "econ_impact": "경제 이벤트 영향 + 예정 리스크를 합쳐 3~4문장으로 요약",
   "recommendations": [
     {
       "ticker": "NVDA",
@@ -113,9 +105,9 @@ _SYSTEM_PROMPT = """\
         {"label": "TP2", "price": 160.0, "pct": 12.3}
       ],
       "risk_reward_ratio": 1.8,
-      "rationale": "구체적 근거 3~4문장...",
-      "risk_factors": "해당 종목 리스크...",
-      "technicals_summary": "RSI 58(중립), MACD 골든크로스, 50일선 위, 거래량 135%"
+      "rationale": "구체적 근거 2문장",
+      "risk_factors": "리스크 1문장",
+      "technicals_summary": "RSI/MACD/MA 한줄 요약"
     }
   ],
   "risk_warnings": ["경고1", "경고2"],
@@ -424,7 +416,7 @@ def _validate_strategy_json(data: dict[str, Any]) -> dict[str, Any]:
     data.setdefault("market_regime", "unknown")
     data.setdefault("market_regime_detail", "")
     data.setdefault("news_themes", [])
-    data.setdefault("econ_analysis", {"summary": "", "recent_surprises": [], "upcoming_risks": []})
+    data.setdefault("econ_impact", "")
     data.setdefault("risk_warnings", [])
     data.setdefault("sector_rotation", "mixed")
 
@@ -448,17 +440,35 @@ async def _call_openai_strategy(
     if _client is None:
         raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다")
 
+    # 토큰 절약: 상위 데이터만 LLM에 전달
     user_content: dict[str, Any] = {
-        "sector_data": sector_data,
-        "sector_etf": sector_etf,
-        "macro_context": {"market_gauge": market_gauge, "vix": vix, "macro": macro},
+        "sector_data": sector_data[:5],
+        "sector_etf": [{"sector": e["sector"], "weekly": e.get("weekly_return"), "momentum": e.get("momentum")} for e in sector_etf[:6]],
+        "macro_context": {"market_gauge": market_gauge, "vix": vix},
     }
+    # macro에서 핵심만 추출
+    if macro:
+        marquee = macro.get("marquee") or []
+        user_content["macro_context"]["indices"] = [{"name": m["name"], "pct": m.get("pct")} for m in marquee]
     if news_digest:
         user_content["news_digest"] = news_digest
     if econ_digest:
         user_content["econ_digest"] = econ_digest
+    # technicals는 상위 5종목의 핵심 지표만 압축하여 전달 (토큰 절약)
     if technicals:
-        user_content["technicals"] = technicals
+        compact_tech: dict[str, Any] = {}
+        for ticker, tech in list(technicals.items())[:5]:
+            compact_tech[ticker] = {
+                "price": tech.get("current_price"),
+                "rsi": tech.get("rsi_14"),
+                "macd": tech.get("macd_signal"),
+                "ma_pos": tech.get("ma_position"),
+                "bb_pos": tech.get("bollinger_position"),
+                "vol_ratio": tech.get("volume_ratio"),
+                "support": tech.get("support"),
+                "resistance": tech.get("resistance"),
+            }
+        user_content["technicals"] = compact_tech
 
     def _create() -> Any:
         kwargs: dict[str, Any] = {
@@ -500,7 +510,7 @@ _EMPTY_DEFAULTS: dict[str, Any] = {
     "market_regime": "unknown",
     "market_regime_detail": "",
     "news_themes": [],
-    "econ_analysis": {"summary": "", "recent_surprises": [], "upcoming_risks": []},
+    "econ_impact": "",
     "risk_warnings": [],
     "sector_rotation": "mixed",
 }
