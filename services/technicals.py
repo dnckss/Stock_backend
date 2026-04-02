@@ -43,11 +43,19 @@ def compute_technicals(ticker: str) -> dict[str, Any] | None:
     # MultiIndex 컬럼 처리 (단일 티커 download 결과)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+    # 중복 컬럼명 제거 (같은 이름이 여러 개 있을 수 있음)
+    df = df.loc[:, ~df.columns.duplicated()]
 
-    close = df["Close"].squeeze().dropna()
-    high = df["High"].squeeze().dropna()
-    low = df["Low"].squeeze().dropna()
-    volume = df["Volume"].squeeze().dropna()
+    def _to_series(col_name: str) -> pd.Series:
+        s = df[col_name]
+        if isinstance(s, pd.DataFrame):
+            s = s.iloc[:, 0]
+        return s.dropna()
+
+    close = _to_series("Close")
+    high = _to_series("High")
+    low = _to_series("Low")
+    volume = _to_series("Volume")
 
     if len(close) < 20:
         return None
