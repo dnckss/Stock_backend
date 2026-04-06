@@ -39,8 +39,8 @@ STOCK_PROFILE_TIMEOUT_SEC = float(os.getenv("STOCK_PROFILE_TIMEOUT_SEC", "6"))
 # Strategist (Market Strategy)
 # - 최신 스캔 사이클 데이터 추출 창(window) 크기
 STRATEGIST_LATEST_SCAN_WINDOW_MINUTES = 90
-# - 전략 브리핑 OpenAI 응답 캐시 TTL (1시간)
-STRATEGIST_CACHE_TTL_SEC = 3600
+# - 전략 브리핑 OpenAI 응답 캐시 TTL (5분)
+STRATEGIST_CACHE_TTL_SEC = int(os.getenv("STRATEGIST_CACHE_TTL_SEC", "300"))
 # - yfinance Ticker.info(섹터) 호출은 타임아웃 위험이 있어
 #   요청당 최대 호출 개수로 제한하고, 결과는 프로세스 내 캐싱한다.
 STRATEGIST_MAX_YFINANCE_SECTOR_CALLS_PER_REQUEST = 20
