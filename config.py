@@ -62,6 +62,19 @@ STRATEGIST_ECON_MIN_IMPORTANCE = int(os.getenv("STRATEGIST_ECON_MIN_IMPORTANCE",
 STRATEGIST_ECON_MAX_UPCOMING = int(os.getenv("STRATEGIST_ECON_MAX_UPCOMING", "10"))
 STRATEGIST_ECON_MAX_SURPRISES = int(os.getenv("STRATEGIST_ECON_MAX_SURPRISES", "5"))
 
+# Strategist: 신호 우선순위 임계값
+STRATEGIST_VIX_ELEVATED = float(os.getenv("STRATEGIST_VIX_ELEVATED", "25"))
+STRATEGIST_VIX_EXTREME = float(os.getenv("STRATEGIST_VIX_EXTREME", "35"))
+STRATEGIST_GAUGE_FEAR = int(os.getenv("STRATEGIST_GAUGE_FEAR", "30"))
+STRATEGIST_GAUGE_GREED = int(os.getenv("STRATEGIST_GAUGE_GREED", "70"))
+# 뉴스 다이제스트: 티커당 최대 헤드라인 수 (단일 이벤트 과대 해석 방지)
+STRATEGIST_NEWS_PER_TICKER_MAX = int(os.getenv("STRATEGIST_NEWS_PER_TICKER_MAX", "2"))
+# 고임팩트 경제 이벤트 키워드 (리스크 플래그 트리거)
+STRATEGIST_HIGH_RISK_ECON_KEYWORDS = frozenset({
+    "FOMC", "Fed", "CPI", "NFP", "Non-Farm", "GDP", "PCE", "PPI",
+    "ECB", "BOJ", "Employment", "Retail Sales",
+})
+
 # Composite Signal (다중 팩터 복합 스코어)
 # 최종 composite_score 기준 시그널 문턱 (-1 ~ +1 스케일)
 SIGNAL_BUY_THRESHOLD = float(os.getenv("SIGNAL_BUY_THRESHOLD", "0.25"))
