@@ -90,14 +90,40 @@ async def run_analysis_loop():
             await asyncio.sleep(ERROR_RETRY_SEC)
 
 
+def _tag_macro_flash(prev: dict | None, cur: dict) -> dict:
+    """이전 매크로 스냅샷과 비교하여 value가 변경된 항목에 flash=True를 부여한다."""
+    if not prev:
+        return cur
+
+    # name → value 매핑 (marquee + sidebar 통합)
+    prev_map: dict[str, float | None] = {}
+    for key in ("marquee", "sidebar"):
+        for item in prev.get(key) or []:
+            prev_map[item["name"]] = item.get("value")
+
+    for key in ("marquee", "sidebar"):
+        for item in cur.get(key) or []:
+            old_val = prev_map.get(item["name"])
+            item["flash"] = (
+                old_val is not None
+                and item.get("value") is not None
+                and old_val != item["value"]
+            )
+
+    return cur
+
+
 async def run_macro_loop():
     """
-    5분 주기 매크로 지표 업데이트 루프.
+    1분 주기 매크로 지표 업데이트 루프.
     yfinance fast_info로 글로벌 지표를 수집하여 latest_cache에 반영하고 WebSocket으로 브로드캐스트한다.
+    값이 변경된 지표에는 flash=True를 부여하여 프런트에서 강조 효과를 적용할 수 있도록 한다.
     """
     while True:
         try:
+            prev_macro = latest_cache.get("macro")
             macro = await asyncio.to_thread(fetch_macro_indicators)
+            macro = _tag_macro_flash(prev_macro, macro)
             count = len(macro["marquee"]) + len(macro["sidebar"])
 
             latest_cache["macro"] = macro

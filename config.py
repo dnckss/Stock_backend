@@ -118,7 +118,7 @@ NEWS_ANALYSIS_TEMPERATURE = float(os.getenv("NEWS_ANALYSIS_TEMPERATURE", "0.2"))
 NEWS_ANALYSIS_INPUT_MAX_CHARS = int(os.getenv("NEWS_ANALYSIS_INPUT_MAX_CHARS", "12000"))
 
 # Macro Indicators
-MACRO_INTERVAL_SEC = 300
+MACRO_INTERVAL_SEC = int(os.getenv("MACRO_INTERVAL_SEC", "60"))  # 1분 주기
 
 # yfinance 심볼 컨벤션:
 #   인덱스  → ^GSPC(S&P500), ^IXIC(NASDAQ), ^DJI(DOW), ^VIX
