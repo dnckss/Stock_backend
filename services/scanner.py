@@ -19,40 +19,49 @@ from config import (
     MAX_VIX,
     PRICE_DOWNLOAD_BATCH_SIZE,
     PRICE_INTRADAY_INTERVAL,
+    SP500_WIKI_URL,
+    SP500_WIKI_HEADERS,
 )
 
 logger = logging.getLogger(__name__)
-
-_WIKI_SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-_WIKI_HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
 
 
 # ---------------------------------------------------------------------------
 # 1) 티커 수집 — Wikipedia S&P 500 구성종목
 # ---------------------------------------------------------------------------
 
-def get_all_tickers() -> list[str]:
-    """
-    Wikipedia에서 S&P 500 구성종목 티커를 수집한다.
-    실패 시 빈 리스트를 반환하며 호출부에서 적절히 처리한다.
+def get_sp500_constituents() -> list[dict[str, str]]:
+    """Wikipedia에서 S&P 500 구성종목(ticker, name, sector)을 가져온다.
+
+    Returns:
+        [{"ticker": "AAPL", "name": "Apple Inc.", "sector": "Information Technology"}, ...]
+        실패 시 빈 리스트.
     """
     try:
-        resp = requests.get(_WIKI_SP500_URL, headers=_WIKI_HEADERS, timeout=15)
+        resp = requests.get(SP500_WIKI_URL, headers=SP500_WIKI_HEADERS, timeout=15)
         resp.raise_for_status()
-        tables = pd.read_html(StringIO(resp.text))
-        df = tables[0]
-        raw_tickers = df["Symbol"].tolist()
-        tickers = sorted({t.strip().replace(".", "-") for t in raw_tickers if isinstance(t, str) and t.strip()})
-        print(f"S&P 500 티커 {len(tickers)}개 수집 완료")
-        return tickers
+        df = pd.read_html(StringIO(resp.text))[0]
+        rows: list[dict[str, str]] = []
+        for _, row in df.iterrows():
+            ticker = str(row.get("Symbol", "")).strip().replace(".", "-")
+            name = str(row.get("Security", "")).strip()
+            sector = str(row.get("GICS Sector", "")).strip()
+            if ticker and sector:
+                rows.append({"ticker": ticker, "name": name, "sector": sector})
+        print(f"S&P 500 구성종목 {len(rows)}개 수집 완료")
+        return rows
     except requests.RequestException as e:
         print(f"Wikipedia 네트워크 에러: {e}")
     except (ValueError, KeyError) as e:
         print(f"Wikipedia 파싱 에러: {e}")
     except Exception as e:
         print(f"티커 수집 실패: {e}")
-
     return []
+
+
+def get_all_tickers() -> list[str]:
+    """S&P 500 구성종목 티커 목록을 반환한다. 실패 시 빈 리스트."""
+    return sorted({c["ticker"] for c in get_sp500_constituents()})
 
 
 # ---------------------------------------------------------------------------

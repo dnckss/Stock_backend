@@ -160,6 +160,10 @@ MACRO_FALLBACK = {
     "sidebar": [{"name": d["name"], "value": None, "change": None, "pct": None} for d in MACRO_SIDEBAR],
 }
 
+# S&P 500 Wikipedia 데이터 소스 (scanner + heatmap 공용)
+SP500_WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+SP500_WIKI_HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
+
 NEWS_FALLBACK_TICKERS = [
     "AAPL", "MSFT", "NVDA", "GOOGL", "TSLA", "META", "AMZN", "AMD",
 ]

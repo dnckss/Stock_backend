@@ -25,7 +25,6 @@ from config import (
     STRATEGIST_ECON_UPCOMING_HOURS,
     STRATEGIST_FALLBACK_TOP_PICKS_N,
     STRATEGIST_GAUGE_FEAR,
-    STRATEGIST_GAUGE_GREED,
     STRATEGIST_HIGH_RISK_ECON_KEYWORDS,
     STRATEGIST_MAX_YFINANCE_SECTOR_CALLS_PER_REQUEST,
     STRATEGIST_NEWS_PER_TICKER_MAX,
@@ -693,10 +692,8 @@ async def _call_openai_strategy(
     if _client is None:
         raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다")
 
-    # 분석 컨텍스트 (리스크 플래그, 시장 상태)
     analysis_context = _build_analysis_context(vix, market_gauge, econ_digest)
 
-    # 매크로 지표에 분류 라벨 추가
     macro_context: dict[str, Any] = {
         "_meta": {"as_of": datetime.now(_KST).isoformat(), "freshness": "realtime"},
         "market_gauge": market_gauge,
@@ -937,7 +934,6 @@ async def build_market_strategy(
         "vix": vix,
     }
 
-    # LLM에는 압축된 기술적 지표 전달, 응답 조립에는 원본 사용
     technicals_compressed = _compress_technicals_for_llm(technicals) if technicals else None
 
     try:

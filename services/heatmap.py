@@ -7,11 +7,8 @@ import math
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
-from io import StringIO
 from typing import Any
 
-import pandas as pd
-import requests
 import yfinance as yf
 
 from config import (
@@ -30,35 +27,8 @@ _heatmap_cache: dict[str, Any] | None = None
 _heatmap_cache_at: float = 0.0
 _heatmap_lock = asyncio.Lock()
 
-# 구성종목 + 시가총액 장기 캐시 (30분)
 _constituents: list[dict[str, Any]] = []
 _constituents_at: float = 0.0
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-_WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-_WIKI_HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
-
-
-# ---------------------------------------------------------------------------
-# Wikipedia S&P 500 구성종목
-# ---------------------------------------------------------------------------
-
-def _fetch_sp500_from_wiki() -> list[dict[str, str]]:
-    """Wikipedia에서 S&P 500 구성종목(ticker, name, sector)을 가져온다."""
-    resp = requests.get(_WIKI_URL, headers=_WIKI_HEADERS, timeout=15)
-    resp.raise_for_status()
-    df = pd.read_html(StringIO(resp.text))[0]
-    rows: list[dict[str, str]] = []
-    for _, row in df.iterrows():
-        ticker = str(row.get("Symbol", "")).strip().replace(".", "-")
-        name = str(row.get("Security", "")).strip()
-        sector = str(row.get("GICS Sector", "")).strip()
-        if ticker and sector:
-            rows.append({"ticker": ticker, "name": name, "sector": sector})
-    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +72,7 @@ def _fetch_prices(tickers: list[str]) -> dict[str, dict[str, float | None]]:
     try:
         df = yf.download(
             " ".join(tickers),
-            period="5d",
+            period="2d",
             interval="1d",
             group_by="ticker",
             progress=False,
@@ -137,7 +107,8 @@ async def _refresh_constituents() -> list[dict[str, Any]]:
     """Wikipedia 구성종목 + 시가총액을 갱신한다."""
     global _constituents, _constituents_at
 
-    wiki = await asyncio.to_thread(_fetch_sp500_from_wiki)
+    from services.scanner import get_sp500_constituents
+    wiki = await asyncio.to_thread(get_sp500_constituents)
     tickers = [d["ticker"] for d in wiki]
     mcaps = await _fetch_market_caps(tickers)
 

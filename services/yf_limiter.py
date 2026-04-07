@@ -56,23 +56,24 @@ def throttled(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
 
     for attempt in range(1, YF_RATE_LIMIT_RETRIES + 1):
         with _sem:
-            # 글로벌 최소 간격 보장
+            # lock은 타임스탬프 갱신만, sleep은 lock 밖에서 수행
             with _lock:
-                gap = YF_MIN_INTERVAL_SEC - (time.time() - _last_ts)
-                if gap > 0:
-                    time.sleep(gap)
-                _last_ts = time.time()
+                now = time.time()
+                wait_until = _last_ts + YF_MIN_INTERVAL_SEC
+                gap = max(0.0, wait_until - now)
+                _last_ts = max(now, wait_until)
+            if gap > 0:
+                time.sleep(gap)
             try:
                 return fn(*args, **kwargs)
             except Exception as e:
-                if _is_rate_limit(e) and attempt < YF_RATE_LIMIT_RETRIES:
-                    delay = YF_RATE_LIMIT_BACKOFF_SEC * (2 ** (attempt - 1))
-                    logger.warning(
-                        "yfinance rate limit (시도 %d/%d), %.1fs 대기 후 재시도",
-                        attempt, YF_RATE_LIMIT_RETRIES, delay,
-                    )
-                    time.sleep(delay)
-                    continue
-                raise
-    # type-checker 만족용 — 도달 불가
+                if not (_is_rate_limit(e) and attempt < YF_RATE_LIMIT_RETRIES):
+                    raise
+        # sem 해제 후 백오프 — 슬롯을 점유하지 않음
+        delay = YF_RATE_LIMIT_BACKOFF_SEC * (2 ** (attempt - 1))
+        logger.warning(
+            "yfinance rate limit (시도 %d/%d), %.1fs 대기 후 재시도",
+            attempt, YF_RATE_LIMIT_RETRIES, delay,
+        )
+        time.sleep(delay)
     raise RuntimeError("yfinance throttled: max retries exceeded")
