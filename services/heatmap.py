@@ -66,14 +66,16 @@ def _fetch_sp500_from_wiki() -> list[dict[str, str]]:
 # ---------------------------------------------------------------------------
 
 async def _fetch_market_caps(tickers: list[str]) -> dict[str, float | None]:
-    """fast_info로 시가총액을 병렬 조회한다."""
+    """fast_info로 시가총액을 병렬 조회한다 (글로벌 속도 제한 적용)."""
+    from services.yf_limiter import throttled
+
     sem = asyncio.Semaphore(HEATMAP_MCAP_CONCURRENCY)
 
     async def _one(t: str) -> tuple[str, float | None]:
         async with sem:
             def _get() -> float | None:
                 try:
-                    mc = yf.Ticker(t).fast_info["marketCap"]
+                    mc = throttled(lambda: yf.Ticker(t).fast_info["marketCap"])
                     return float(mc) if mc and not math.isnan(mc) else None
                 except Exception:
                     return None

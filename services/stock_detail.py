@@ -53,9 +53,11 @@ def _pct(current: Any, base: Any) -> float | None:
 
 def fetch_quote(ticker: str) -> dict[str, Any]:
     """실시간 시세 + 기본 정보를 가져온다."""
+    from services.yf_limiter import throttled
+
     t = yf.Ticker(ticker)
 
-    fi = t.fast_info
+    fi = throttled(lambda: t.fast_info)
 
     # 회사 정보 캐시 활용 (info 호출은 느리고 실패할 수 있음)
     if ticker in _company_info_cache:
@@ -63,7 +65,7 @@ def fetch_quote(ticker: str) -> dict[str, Any]:
     else:
         info = {}
         try:
-            info = t.info or {}
+            info = throttled(lambda: t.info or {})
             if info.get("longName") or info.get("shortName"):
                 _company_info_cache[ticker] = info
         except Exception:

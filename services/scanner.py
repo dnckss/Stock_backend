@@ -178,12 +178,14 @@ def refresh_intraday_prices(tickers: list[str]) -> dict[str, dict]:
     out: dict[str, dict] = {}
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    from services.yf_limiter import throttled
+
     for ticker in tickers:
         key = (ticker or "").upper().strip()
         if not key:
             continue
         try:
-            fi = yf.Ticker(key).fast_info
+            fi = throttled(lambda _k=key: yf.Ticker(_k).fast_info)
             price = fi.get("lastPrice")
             if price is None or not math.isfinite(price):
                 continue
@@ -241,8 +243,10 @@ def merge_intraday_into_candidates(candidates: list[dict], live: dict[str, dict]
 
 def _fetch_macro_value(ticker: str, decimals: int) -> dict:
     """yfinance fast_info로 지표 현재값·변동·변동률을 조회한다."""
+    from services.yf_limiter import throttled
+
     try:
-        fi = yf.Ticker(ticker).fast_info
+        fi = throttled(lambda: yf.Ticker(ticker).fast_info)
         price = fi.get("lastPrice")
         prev_close = fi.get("previousClose")
 

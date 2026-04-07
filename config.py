@@ -182,6 +182,12 @@ STRATEGIST_TICKER_SECTOR_MAP: dict[str, str] = {
     "AMZN": "Consumer Cyclical",
 }
 
+# yfinance Global Rate Limiting (모든 서비스 공용)
+YF_GLOBAL_CONCURRENCY = int(os.getenv("YF_GLOBAL_CONCURRENCY", "10"))
+YF_MIN_INTERVAL_SEC = float(os.getenv("YF_MIN_INTERVAL_SEC", "0.05"))
+YF_RATE_LIMIT_RETRIES = int(os.getenv("YF_RATE_LIMIT_RETRIES", "3"))
+YF_RATE_LIMIT_BACKOFF_SEC = float(os.getenv("YF_RATE_LIMIT_BACKOFF_SEC", "2.0"))
+
 # S&P 500 Heatmap
 HEATMAP_CACHE_TTL_SEC = int(os.getenv("HEATMAP_CACHE_TTL_SEC", "120"))        # 가격 캐시 2분
 HEATMAP_MCAP_CACHE_TTL_SEC = int(os.getenv("HEATMAP_MCAP_CACHE_TTL_SEC", "1800"))  # 시가총액 캐시 30분

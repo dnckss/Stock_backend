@@ -24,9 +24,11 @@ def get_earnings_surprise(ticker: str) -> dict | None:
         }
         또는 데이터 없으면 None.
     """
+    from services.yf_limiter import throttled
+
     try:
         t = yf.Ticker(ticker)
-        df = t.get_earnings_history()
+        df = throttled(t.get_earnings_history)
 
         if df is None or df.empty:
             return None

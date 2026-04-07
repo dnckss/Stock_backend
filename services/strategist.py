@@ -552,7 +552,8 @@ def _compute_sector_data(rows: list[dict[str, Any]], ticker_to_sector: dict[str,
 
 async def _resolve_sector_yfinance(ticker: str) -> str:
     def _fetch() -> Any:
-        info = yf.Ticker(ticker).info or {}
+        from services.yf_limiter import throttled
+        info = throttled(lambda: yf.Ticker(ticker).info or {})
         return info.get("sector")
     try:
         sector = await asyncio.wait_for(asyncio.to_thread(_fetch), timeout=STRATEGIST_YFINANCE_SECTOR_TIMEOUT_SEC)
