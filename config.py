@@ -182,6 +182,11 @@ STRATEGIST_TICKER_SECTOR_MAP: dict[str, str] = {
     "AMZN": "Consumer Cyclical",
 }
 
+# S&P 500 Heatmap
+HEATMAP_CACHE_TTL_SEC = int(os.getenv("HEATMAP_CACHE_TTL_SEC", "120"))        # 가격 캐시 2분
+HEATMAP_MCAP_CACHE_TTL_SEC = int(os.getenv("HEATMAP_MCAP_CACHE_TTL_SEC", "1800"))  # 시가총액 캐시 30분
+HEATMAP_MCAP_CONCURRENCY = int(os.getenv("HEATMAP_MCAP_CONCURRENCY", "30"))   # 시가총액 동시 조회 수
+
 # Market gauge (VIX -> 0~100)
 # VIX를 MIN_VIX~MAX_VIX로 클램프 후 로그 스케일로 0~100으로 변환
 MIN_VIX = 10.0
