@@ -12,6 +12,7 @@ import yfinance as yf
 from config import (
     MIN_VOLUME,
     SCAN_TOP_N,
+    SCAN_TRADING_DAYS,
     MACRO_MARQUEE,
     MACRO_SIDEBAR,
     MACRO_FALLBACK,
@@ -71,16 +72,13 @@ def get_all_tickers() -> list[str]:
 _DOWNLOAD_BATCH_SIZE = 100
 
 
-_TRADING_DAYS_FOR_RETURN = 5
-
-
 def _compute_return(series: pd.Series) -> float | None:
-    """Close 시리즈에서 최근 5거래일 수익률을 계산한다. 유효하지 않으면 None."""
+    """Close 시리즈에서 최근 N거래일 수익률을 계산한다. 유효하지 않으면 None."""
     valid = series.dropna()
     if len(valid) < 2:
         return None
-    # 정확히 5거래일분 사용 (10캘린더일 다운로드 → 뒤에서 N+1개 슬라이스)
-    tail = valid.iloc[-(min(_TRADING_DAYS_FOR_RETURN + 1, len(valid))):]
+    window = min(SCAN_TRADING_DAYS + 1, len(valid))
+    tail = valid.iloc[-window:]
     first, last = float(tail.iloc[0]), float(tail.iloc[-1])
     if first == 0:
         return None
@@ -163,8 +161,7 @@ def scan_stocks(tickers: list[str]) -> list[dict]:
                     except Exception:
                         continue
 
-                # 5거래일분 일봉만 유지 (10d 다운로드 중 최근 N+1개)
-                keep = _TRADING_DAYS_FOR_RETURN + 1
+                keep = SCAN_TRADING_DAYS + 1
                 trimmed_bars = daily_bars[-keep:] if len(daily_bars) > keep else daily_bars
 
                 candidates.append({
