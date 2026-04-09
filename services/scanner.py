@@ -71,12 +71,17 @@ def get_all_tickers() -> list[str]:
 _DOWNLOAD_BATCH_SIZE = 100
 
 
+_TRADING_DAYS_FOR_RETURN = 5
+
+
 def _compute_return(series: pd.Series) -> float | None:
-    """Close 시리즈에서 최근 5일 수익률을 계산한다. 유효하지 않으면 None."""
+    """Close 시리즈에서 최근 5거래일 수익률을 계산한다. 유효하지 않으면 None."""
     valid = series.dropna()
     if len(valid) < 2:
         return None
-    first, last = float(valid.iloc[0]), float(valid.iloc[-1])
+    # 정확히 5거래일분 사용 (10캘린더일 다운로드 → 뒤에서 N+1개 슬라이스)
+    tail = valid.iloc[-(min(_TRADING_DAYS_FOR_RETURN + 1, len(valid))):]
+    first, last = float(tail.iloc[0]), float(tail.iloc[-1])
     if first == 0:
         return None
     ret = (last - first) / first
@@ -85,7 +90,7 @@ def _compute_return(series: pd.Series) -> float | None:
 
 def scan_stocks(tickers: list[str]) -> list[dict]:
     """
-    yf.download()로 5일치 종가·거래량을 배치 조회하고,
+    yf.download()로 10캘린더일(≥5거래일)치 종가·거래량을 배치 조회하고,
     거래량 필터를 적용한 뒤, 변동률 기준으로 정렬된 전체 유효 종목 리스트를 반환한다.
     """
     if not tickers:
@@ -98,7 +103,7 @@ def scan_stocks(tickers: list[str]) -> list[dict]:
         try:
             data = yf.download(
                 batch,
-                period="5d",
+                period="10d",
                 interval="1d",
                 group_by="ticker",
                 progress=False,
@@ -158,12 +163,16 @@ def scan_stocks(tickers: list[str]) -> list[dict]:
                     except Exception:
                         continue
 
+                # 5거래일분 일봉만 유지 (10d 다운로드 중 최근 N+1개)
+                keep = _TRADING_DAYS_FOR_RETURN + 1
+                trimmed_bars = daily_bars[-keep:] if len(daily_bars) > keep else daily_bars
+
                 candidates.append({
                     "ticker": ticker,
                     "return": round(ret, 6),
                     "price": round(float(close_series.iloc[-1]), 2),
                     "volume": last_volume,
-                    "daily": daily_bars,
+                    "daily": trimmed_bars,
                 })
             except Exception:
                 continue
