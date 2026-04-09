@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 _heatmap_cache: dict[str, Any] | None = None
 _heatmap_cache_at: float = 0.0
 _heatmap_lock = asyncio.Lock()
+_refresh_task: asyncio.Task[None] | None = None
 
 _constituents: list[dict[str, Any]] = []
 _constituents_at: float = 0.0
@@ -172,28 +173,55 @@ async def build_sp500_heatmap() -> dict[str, Any]:
     }
 
 
-async def get_cached_sp500_heatmap() -> dict[str, Any]:
-    """캐시된 히트맵을 반환한다. TTL 만료 시 갱신."""
+async def _background_refresh() -> None:
+    """백그라운드에서 히트맵을 갱신 → 메모리 + DB 저장."""
     global _heatmap_cache, _heatmap_cache_at
+    try:
+        result = await build_sp500_heatmap()
+        _heatmap_cache = result
+        _heatmap_cache_at = time.time()
+        from services.crud import save_heatmap_snapshot
+        await asyncio.to_thread(save_heatmap_snapshot, result)
+        logger.info("히트맵 백그라운드 갱신 완료")
+    except Exception as e:
+        logger.error("히트맵 백그라운드 갱신 실패: %s", e, exc_info=True)
+
+
+async def get_cached_sp500_heatmap() -> dict[str, Any]:
+    """Stale-While-Revalidate: DB/메모리 캐시를 즉시 반환, 백그라운드 갱신."""
+    global _heatmap_cache, _heatmap_cache_at, _refresh_task
 
     now = time.time()
+
+    # 1) 메모리 캐시 신선 → 즉시 반환
     if _heatmap_cache and (now - _heatmap_cache_at < HEATMAP_CACHE_TTL_SEC):
         return _heatmap_cache
 
+    need_refresh = not _refresh_task or _refresh_task.done()
+
+    # 2) 메모리 캐시 stale → 즉시 반환 + 백그라운드 갱신
+    if _heatmap_cache:
+        if need_refresh:
+            _refresh_task = asyncio.create_task(_background_refresh())
+        return _heatmap_cache
+
+    # 3) 메모리 없음 → DB 스냅샷 로드
+    from services.crud import get_heatmap_snapshot
+    db_data = await asyncio.to_thread(get_heatmap_snapshot)
+    if db_data:
+        _heatmap_cache = db_data
+        _heatmap_cache_at = 0.0  # stale 표시 → 다음 요청에서 갱신 트리거
+        if need_refresh:
+            _refresh_task = asyncio.create_task(_background_refresh())
+        return db_data
+
+    # 4) 어디에도 없음 → 동기 빌드 (최초 1회)
     async with _heatmap_lock:
-        # 더블체크
-        now = time.time()
-        if _heatmap_cache and (now - _heatmap_cache_at < HEATMAP_CACHE_TTL_SEC):
+        if _heatmap_cache:
             return _heatmap_cache
-
-        try:
-            result = await build_sp500_heatmap()
-        except Exception as e:
-            logger.error("S&P 500 히트맵 생성 실패: %s", e, exc_info=True)
-            if _heatmap_cache:
-                return _heatmap_cache
-            raise
-
+        result = await build_sp500_heatmap()
         _heatmap_cache = result
         _heatmap_cache_at = time.time()
+        from services.crud import save_heatmap_snapshot
+        await asyncio.to_thread(save_heatmap_snapshot, result)
         return result

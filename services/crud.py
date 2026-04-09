@@ -405,3 +405,52 @@ def get_strategy_history(limit: int = 20, ticker: str | None = None) -> list[dic
         query = query.eq("ticker", ticker.upper())
     resp = query.execute()
     return _sanitize(resp.data)
+
+
+# ---------------------------------------------------------------------------
+# S&P 500 Heatmap Snapshot
+# ---------------------------------------------------------------------------
+# Supabase 테이블 생성 SQL:
+#   CREATE TABLE sp500_heatmap (
+#       id INTEGER PRIMARY KEY DEFAULT 1,
+#       data_json TEXT NOT NULL,
+#       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+#   );
+
+def save_heatmap_snapshot(data: dict) -> None:
+    """sp500_heatmap 테이블에 히트맵 스냅샷을 upsert한다."""
+    client = _get_client()
+    row = {
+        "id": 1,
+        "data_json": json.dumps(sanitize_for_json(data), ensure_ascii=False),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        client.table("sp500_heatmap").upsert(row, on_conflict="id").execute()
+    except Exception as e:
+        logger.warning("히트맵 DB 저장 실패: %s", e)
+
+
+def get_heatmap_snapshot() -> dict | None:
+    """sp500_heatmap 테이블에서 최신 스냅샷을 읽는다. 없으면 None."""
+    client = _get_client()
+    try:
+        resp = (
+            client.table("sp500_heatmap")
+            .select("data_json")
+            .eq("id", 1)
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:
+        logger.warning("히트맵 DB 조회 실패: %s", e)
+        return None
+    if not resp.data:
+        return None
+    raw = resp.data[0].get("data_json")
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    return raw if isinstance(raw, dict) else None
