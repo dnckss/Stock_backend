@@ -37,6 +37,17 @@ PRICE_DOWNLOAD_BATCH_SIZE = int(os.getenv("PRICE_DOWNLOAD_BATCH_SIZE", "50"))
 # Stock detail: 회사명 조회 timeout (yfinance Ticker.info)
 STOCK_PROFILE_TIMEOUT_SEC = float(os.getenv("STOCK_PROFILE_TIMEOUT_SEC", "6"))
 
+# ---------------------------------------------------------------------------
+# Stock Fundamentals (종목 펀더멘털)
+# ---------------------------------------------------------------------------
+FUNDAMENTALS_MAX_QUARTERS = int(os.getenv("FUNDAMENTALS_MAX_QUARTERS", "12"))
+FUNDAMENTALS_MAX_OFFICERS = int(os.getenv("FUNDAMENTALS_MAX_OFFICERS", "5"))
+FUNDAMENTALS_MAX_EARNINGS_HISTORY = int(os.getenv("FUNDAMENTALS_MAX_EARNINGS_HISTORY", "8"))
+FUNDAMENTALS_CACHE_TTL_SEC = int(os.getenv("FUNDAMENTALS_CACHE_TTL_SEC", "300"))
+FUNDAMENTALS_VALID_SECTIONS = frozenset({
+    "profile", "indicators", "profitability", "growth", "stability", "earnings",
+})
+
 # Strategist (Market Strategy)
 # - 최신 스캔 사이클 데이터 추출 창(window) 크기
 STRATEGIST_LATEST_SCAN_WINDOW_MINUTES = 90

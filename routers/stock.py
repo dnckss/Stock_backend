@@ -7,7 +7,10 @@ from services.crud import get_latest_report, get_history, sanitize_for_json
 from services.news_feed import build_stock_news_feed
 from services.stock_detail import fetch_quote, fetch_chart, format_market_cap
 from services.stock_analysis import analyze_stock
+from services.stock_fundamentals import fetch_all_fundamentals, SECTION_FETCHERS
 from services.technicals import compute_technicals
+
+from config import FUNDAMENTALS_VALID_SECTIONS
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["Stock"])
@@ -73,6 +76,35 @@ async def api_stock_analysis(ticker: str):
         return sanitize_for_json({"ticker": upper, "analysis": None, "error": result["error"]})
 
     return sanitize_for_json({"ticker": upper, "analysis": result})
+
+
+@router.get("/stock/{ticker}/fundamentals/{section}")
+async def api_stock_fundamentals_section(ticker: str, section: str):
+    """펀더멘털 개별 섹션 조회 (탭 전환 / lazy-loading)."""
+    upper = ticker.upper()
+    if section not in FUNDAMENTALS_VALID_SECTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"유효한 섹션: {', '.join(sorted(FUNDAMENTALS_VALID_SECTIONS))}",
+        )
+    try:
+        data = await asyncio.to_thread(SECTION_FETCHERS[section], upper)
+    except Exception as e:
+        logger.exception("펀더멘털 섹션 조회 실패 (%s/%s): %s", upper, section, e)
+        raise HTTPException(status_code=500, detail=f"펀더멘털 조회 실패: {e}")
+    return sanitize_for_json({"ticker": upper, **data})
+
+
+@router.get("/stock/{ticker}/fundamentals")
+async def api_stock_fundamentals(ticker: str):
+    """종목 펀더멘털 전체 조회 (기업개요, 투자지표, 수익성, 성장성, 안정성, 실적)."""
+    upper = ticker.upper()
+    try:
+        data = await asyncio.to_thread(fetch_all_fundamentals, upper)
+    except Exception as e:
+        logger.exception("펀더멘털 조회 실패 (%s): %s", upper, e)
+        raise HTTPException(status_code=500, detail=f"펀더멘털 조회 실패: {e}")
+    return sanitize_for_json({"ticker": upper, **data})
 
 
 @router.get("/stock/{ticker}")
