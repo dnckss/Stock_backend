@@ -373,6 +373,67 @@ def _build_earnings(
     }
 
 
+def _build_price_performance(ticker: str) -> dict[str, Any]:
+    """기간별 등락률, 거래량, 거래대금 (1D / 5D / 1W / 1M / 1Y)."""
+    from services.yf_limiter import throttled
+
+    try:
+        df = throttled(
+            lambda: yf.download(ticker, period="13mo", interval="1d", progress=False)
+        )
+    except Exception as e:
+        logger.debug("price_performance 다운로드 실패 (%s): %s", ticker, e)
+        return {"periods": []}
+
+    if df is None or df.empty or len(df) < 2:
+        return {"periods": []}
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    latest_date = df.index[-1]
+    current_close = float(df["Close"].iloc[-1])
+
+    # (label, calendar offset from latest_date)
+    _offsets = [
+        ("1D", pd.DateOffset(days=1)),
+        ("5D", pd.DateOffset(days=7)),
+        ("1W", pd.DateOffset(weeks=1)),
+        ("1M", pd.DateOffset(months=1)),
+        ("1Y", pd.DateOffset(years=1)),
+    ]
+
+    periods: list[dict[str, Any]] = []
+    for label, offset in _offsets:
+        target_date = latest_date - offset
+        # target_date 이후의 가장 오래된 거래일 찾기
+        mask = df.index >= target_date
+        if not mask.any():
+            periods.append({
+                "label": label,
+                "change_pct": None,
+                "volume": None,
+                "trading_value": None,
+            })
+            continue
+
+        period_df = df.loc[mask]
+        past_close = float(period_df["Close"].iloc[0])
+        change_pct = _safe((current_close - past_close) / past_close * 100, 2) if past_close else None
+
+        vol = period_df["Volume"].sum()
+        tv = (period_df["Close"] * period_df["Volume"]).sum()
+
+        periods.append({
+            "label": label,
+            "change_pct": change_pct,
+            "volume": int(vol) if not pd.isna(vol) else None,
+            "trading_value": _safe(tv, 0),
+        })
+
+    return {"periods": periods}
+
+
 # ---------------------------------------------------------------------------
 # 헬퍼
 # ---------------------------------------------------------------------------
@@ -409,6 +470,7 @@ def fetch_all_fundamentals(ticker: str) -> dict[str, Any]:
         "growth": _build_growth(qf),
         "stability": _build_stability(qbs),
         "earnings": _build_earnings(info, ed),
+        "price_performance": _build_price_performance(ticker),
     }
 
     _set_cached(ticker, data)
@@ -460,6 +522,11 @@ def fetch_earnings(ticker: str) -> dict[str, Any]:
     return {"earnings": _build_earnings(info, ed)}
 
 
+def fetch_price_performance(ticker: str) -> dict[str, Any]:
+    """기간별 등락률·거래량·거래대금만 조회한다."""
+    return {"price_performance": _build_price_performance(ticker)}
+
+
 # 섹션 이름 → fetch 함수 매핑 (라우터에서 사용)
 SECTION_FETCHERS: dict[str, Any] = {
     "profile": fetch_profile,
@@ -468,4 +535,5 @@ SECTION_FETCHERS: dict[str, Any] = {
     "growth": fetch_growth,
     "stability": fetch_stability,
     "earnings": fetch_earnings,
+    "price_performance": fetch_price_performance,
 }

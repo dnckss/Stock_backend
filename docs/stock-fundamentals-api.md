@@ -35,7 +35,8 @@ GET /api/stock/{ticker}/fundamentals
   "profitability": { ... },
   "growth": { ... },
   "stability": { ... },
-  "earnings": { ... }
+  "earnings": { ... },
+  "price_performance": { ... }
 }
 ```
 
@@ -59,7 +60,7 @@ GET /api/stock/{ticker}/fundamentals/{section}
 | 파라미터 | 타입 | 설명 | 유효값 |
 |----------|------|------|--------|
 | `ticker` | string | 종목 티커 심볼 | `AAPL` |
-| `section` | string | 섹션 이름 | `profile`, `indicators`, `profitability`, `growth`, `stability`, `earnings` |
+| `section` | string | 섹션 이름 | `profile`, `indicators`, `profitability`, `growth`, `stability`, `earnings`, `price_performance` |
 
 ### Response (200 OK)
 
@@ -317,6 +318,62 @@ GET /api/stock/{ticker}/fundamentals/{section}
 
 ---
 
+### price_performance (기간별 등락률·거래량·거래대금)
+
+1일, 5일, 1주, 1월, 1년 기간별 수익률과 거래 데이터.
+
+```json
+{
+  "periods": [
+    {
+      "label": "1D",
+      "change_pct": 0.0,
+      "volume": 35080398,
+      "trading_value": 9092839590
+    },
+    {
+      "label": "5D",
+      "change_pct": 0.13,
+      "volume": 226972198,
+      "trading_value": 58530956957
+    },
+    {
+      "label": "1W",
+      "change_pct": 0.13,
+      "volume": 226972198,
+      "trading_value": 58530956957
+    },
+    {
+      "label": "1M",
+      "change_pct": 3.63,
+      "volume": 851555998,
+      "trading_value": 215430924270
+    },
+    {
+      "label": "1Y",
+      "change_pct": 28.55,
+      "volume": 12616865298,
+      "trading_value": 3011448023936
+    }
+  ]
+}
+```
+
+| 필드 | 타입 | 설명 | 단위 |
+|------|------|------|------|
+| `label` | string | 기간 라벨 | `1D` / `5D` / `1W` / `1M` / `1Y` |
+| `change_pct` | number | 해당 기간 등락률 | % |
+| `volume` | integer | 해당 기간 누적 거래량 | 주 |
+| `trading_value` | number | 해당 기간 누적 거래대금 (종가 x 거래량 합산) | USD |
+
+> - `periods` 배열은 항상 5개 항목 (1D → 5D → 1W → 1M → 1Y 순)
+> - 데이터 불충분 시 해당 항목의 값이 `null`
+> - `1D`는 전일 대비 등락률, `volume`/`trading_value`는 당일 거래만 포함
+> - `5D`와 `1W`는 공휴일이 없으면 동일 값, 공휴일이 있으면 소폭 차이 발생
+> - `trading_value`는 각 거래일의 (종가 x 거래량) 합산값으로, 정확한 거래대금이 아닌 근사값
+
+---
+
 ## 에러 응답
 
 | 코드 | 상황 | 응답 |
@@ -349,3 +406,6 @@ GET /api/stock/{ticker}/fundamentals/{section}
 - `*_margin`, `*_yoy`, `debt_ratio`, `roe`, `dividend_yield`, `payout_ratio`: **퍼센트(%)** → 숫자 그대로 표시 + `%` 붙이기
 - `per`, `psr`, `pbr`: **배수** → 숫자 + `배` 표시
 - `current_ratio`, `interest_coverage_ratio`: **배수** → 숫자 + `배` 표시
+- `change_pct`: **퍼센트(%)** → 숫자 + `%` 표시 (양수=상승, 음수=하락)
+- `volume`: **주** → 프론트에서 포맷 (예: `226,972,198주`)
+- `trading_value`: **USD 원시값** → 프론트에서 포맷 (예: `$58.5B`)

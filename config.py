@@ -46,6 +46,7 @@ FUNDAMENTALS_MAX_EARNINGS_HISTORY = int(os.getenv("FUNDAMENTALS_MAX_EARNINGS_HIS
 FUNDAMENTALS_CACHE_TTL_SEC = int(os.getenv("FUNDAMENTALS_CACHE_TTL_SEC", "300"))
 FUNDAMENTALS_VALID_SECTIONS = frozenset({
     "profile", "indicators", "profitability", "growth", "stability", "earnings",
+    "price_performance",
 })
 
 # Strategist (Market Strategy)
