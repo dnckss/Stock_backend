@@ -390,9 +390,12 @@ def _build_price_performance(ticker: str) -> dict[str, Any]:
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+    # MultiIndex 해제 후 중복 컬럼 발생 시 첫 번째만 사용
+    df = df.loc[:, ~df.columns.duplicated()]
 
     latest_date = df.index[-1]
-    current_close = float(df["Close"].iloc[-1])
+    val = df["Close"].iloc[-1]
+    current_close = float(val.iloc[0]) if hasattr(val, "iloc") else float(val)
 
     # (label, calendar offset from latest_date)
     _offsets = [
@@ -418,7 +421,8 @@ def _build_price_performance(ticker: str) -> dict[str, Any]:
             continue
 
         period_df = df.loc[mask]
-        past_close = float(period_df["Close"].iloc[0])
+        pv = period_df["Close"].iloc[0]
+        past_close = float(pv.iloc[0]) if hasattr(pv, "iloc") else float(pv)
         change_pct = _safe((current_close - past_close) / past_close * 100, 2) if past_close else None
 
         vol = period_df["Volume"].sum()
