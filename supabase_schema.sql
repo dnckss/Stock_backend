@@ -143,3 +143,51 @@ ALTER TABLE news_articles ENABLE ROW LEVEL SECURITY;
 -- anon 키 사용 시 아래 정책 필요:
 CREATE POLICY "Allow all for anon" ON analysis_results FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow all for anon" ON news_articles FOR ALL USING (true) WITH CHECK (true);
+
+-- ---------------------------------------------------------------------------
+-- 8. chat_sessions / chat_messages / chat_files (AI 챗봇 영구 저장)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS chat_sessions (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL DEFAULT '새 채팅',
+    last_message_preview TEXT,
+    message_count INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated ON chat_sessions (updated_at DESC);
+
+ALTER TABLE chat_sessions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow all for anon" ON chat_sessions FOR ALL USING (true) WITH CHECK (true);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    content TEXT NOT NULL,
+    attachments_json JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages (session_id, created_at);
+
+ALTER TABLE chat_messages ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow all for anon" ON chat_messages FOR ALL USING (true) WITH CHECK (true);
+
+CREATE TABLE IF NOT EXISTS chat_files (
+    id TEXT PRIMARY KEY,
+    session_id TEXT REFERENCES chat_sessions(id) ON DELETE SET NULL,
+    filename TEXT NOT NULL,
+    content_type TEXT,
+    size_bytes BIGINT NOT NULL DEFAULT 0,
+    extracted_text TEXT NOT NULL DEFAULT '',
+    char_count INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_files_session ON chat_files (session_id);
+CREATE INDEX IF NOT EXISTS idx_chat_files_created ON chat_files (created_at DESC);
+
+ALTER TABLE chat_files ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow all for anon" ON chat_files FOR ALL USING (true) WITH CHECK (true);

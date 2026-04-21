@@ -286,6 +286,25 @@ CHAT_MARKET_KEYWORDS = frozenset({
     "s&p", "sp500", "다우", "dow", "vix", "금리",
 })
 
+# --- 세션/히스토리 ---
+CHAT_SESSIONS_LIST_LIMIT = int(os.getenv("CHAT_SESSIONS_LIST_LIMIT", "50"))
+CHAT_SESSION_TITLE_MAX_CHARS = int(os.getenv("CHAT_SESSION_TITLE_MAX_CHARS", "80"))
+CHAT_SESSION_PREVIEW_MAX_CHARS = int(os.getenv("CHAT_SESSION_PREVIEW_MAX_CHARS", "120"))
+# 세션 로드 시 반환할 최대 메시지 개수 (가장 최근부터)
+CHAT_SESSION_MESSAGE_LIMIT = int(os.getenv("CHAT_SESSION_MESSAGE_LIMIT", "200"))
+
+# --- 파일 첨부 (텍스트 기반만 지원) ---
+CHAT_FILE_MAX_BYTES = int(os.getenv("CHAT_FILE_MAX_BYTES", str(5 * 1024 * 1024)))  # 5 MB
+CHAT_FILE_TEXT_MAX_CHARS = int(os.getenv("CHAT_FILE_TEXT_MAX_CHARS", "30000"))
+CHAT_FILE_ALLOWED_EXT = frozenset({
+    "txt", "md", "markdown", "csv", "tsv", "json", "log",
+    "py", "js", "mjs", "ts", "tsx", "jsx",
+    "html", "htm", "xml", "yaml", "yml", "toml", "ini", "cfg",
+    "sql",
+})
+# 요청 1건에서 첨부 가능한 파일 최대 개수
+CHAT_FILES_PER_REQUEST_MAX = int(os.getenv("CHAT_FILES_PER_REQUEST_MAX", "5"))
+
 # 기술적 지표(RSI/MACD/볼린저/MA 등) 수집 여부 판단 키워드.
 # 없으면 기본적으로 기술적 지표 계산을 스킵해 응답 속도를 확보한다.
 # 매수/매도/진입/타이밍 질의는 기술적 지표가 근거에 필수 → 포함.

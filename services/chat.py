@@ -290,6 +290,8 @@ _SYSTEM_PROMPT = """\
 - `market_gauge` (0~100), `vix`
 - `market_news[]`: 시장 전체 뉴스 헤드라인
 - `strategy_summary`: 시장 전략 브리핑(시장 국면, 섹터 로테이션, 주요 테마, 리스크 경고)
+- `attachments[]`: 사용자가 첨부한 파일의 텍스트 — 질문과 함께 참고 근거로 사용
+  (각 항목: { filename, char_count, text })
 
 ## 답변 규칙
 1. 주어진 context에서 확인 가능한 수치를 **반드시 구체적으로 인용**한다.
@@ -348,12 +350,20 @@ def _normalize_history(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
 async def stream_chat(
     messages: list[dict[str, Any]],
     tickers_override: list[str] | None = None,
+    session_id: str | None = None,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     사용자 메시지 배열을 받아 컨텍스트를 수집하고 OpenAI 응답을 SSE로 스트리밍한다.
 
+    session_id가 주어지면 user 메시지(스트림 시작 시)와 assistant 응답(스트림 완료 시)을
+    Supabase chat_messages 에 영구 저장한다. 세션이 존재하지 않으면 조용히 스킵.
+
+    attachments는 `chat_files` 에서 로드된 파일 목록이며,
+    각 항목의 extracted_text 가 LLM 컨텍스트의 `attachments[]` 필드로 주입된다.
+
     SSE 이벤트:
-      - start    : 파이프라인 시작 (질의, 추출된 티커)
+      - start    : 파이프라인 시작 (질의, 추출된 티커, session_id)
       - stage    : 단계별 진행 상황 (name, status, elapsed_ms 등)
       - context  : 수집된 컨텍스트 최종 요약 (UI가 배지/칩으로 표시 가능)
       - token    : LLM 토큰 (delta 텍스트)
@@ -373,9 +383,33 @@ async def stream_chat(
         yield _sse("error", {"error": "OPENAI_API_KEY가 설정되지 않았습니다."})
         return
 
+    # --- 세션 연결 시 user 메시지 영구 저장 ---
+    attachments_meta = [
+        {
+            "id": a.get("id"),
+            "filename": a.get("filename"),
+            "content_type": a.get("content_type"),
+            "size_bytes": a.get("size_bytes"),
+            "char_count": a.get("char_count"),
+        }
+        for a in (attachments or [])
+        if a
+    ]
+    if session_id:
+        try:
+            from services.chat_store import append_message as _persist_message
+            await asyncio.to_thread(
+                _persist_message,
+                session_id, "user", user_message, attachments_meta or None,
+            )
+        except Exception as e:
+            logger.warning("user 메시지 저장 실패 (session=%s): %s", session_id, e)
+
     yield _sse("start", {
         "query": user_message,
         "history_len": len(history),
+        "session_id": session_id,
+        "attachments": attachments_meta,
     })
 
     # --- 계획 수립: 무엇을 수집할지 결정 ---
@@ -391,6 +425,18 @@ async def stream_chat(
         "include_market": include_market,
     })
 
+    # 첨부 파일 텍스트를 컨텍스트에 주입 (LLM이 참고할 수 있도록)
+    attachments_payload: list[dict[str, Any]] = []
+    for a in attachments or []:
+        text = (a or {}).get("extracted_text") or ""
+        if not text.strip():
+            continue
+        attachments_payload.append({
+            "filename": a.get("filename"),
+            "char_count": a.get("char_count"),
+            "text": text,
+        })
+
     context: dict[str, Any] = {
         "tickers": tickers,
         "stocks": [],
@@ -399,6 +445,7 @@ async def stream_chat(
         "vix": latest_cache.get("vix"),
         "market_news": [],
         "strategy_summary": None,
+        "attachments": attachments_payload,
     }
 
     # --- Stage 1: 종목 시세 + 뉴스 (병렬) ---
@@ -479,6 +526,7 @@ async def stream_chat(
         ],
         "has_strategy": context["strategy_summary"] is not None,
         "market_news_count": len(context["market_news"]),
+        "attachments_count": len(attachments_payload),
     })
 
     # --- Stage 4: LLM 스트리밍 ---
@@ -543,9 +591,21 @@ async def stream_chat(
         yield _sse("error", {"error": f"스트리밍 오류: {e}", "partial": full_text})
         return
 
+    # --- 세션 연결 시 assistant 응답 영구 저장 ---
+    if session_id and full_text.strip():
+        try:
+            from services.chat_store import append_message as _persist_message
+            await asyncio.to_thread(
+                _persist_message,
+                session_id, "assistant", full_text, None,
+            )
+        except Exception as e:
+            logger.warning("assistant 메시지 저장 실패 (session=%s): %s", session_id, e)
+
     yield _sse("done", {
         "answer": full_text,
         "elapsed_sec": round(time.time() - start_ts, 2),
         "ttft_ms": int((first_token_ts - start_ts) * 1000) if first_token_ts else None,
         "model": model,
+        "session_id": session_id,
     })
