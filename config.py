@@ -241,7 +241,8 @@ XAI_AGENT_TEMPERATURE = float(os.getenv("XAI_AGENT_TEMPERATURE", "0.4"))
 # ---------------------------------------------------------------------------
 # AI Chat (종목 질의 챗봇, SSE 스트리밍)
 # ---------------------------------------------------------------------------
-CHAT_OPENAI_MODEL = os.getenv("CHAT_OPENAI_MODEL", "gpt-5")
+# 챗봇은 응답 속도가 중요 — 기본값을 경량 모델로. 품질 우선이면 env로 gpt-5 지정.
+CHAT_OPENAI_MODEL = os.getenv("CHAT_OPENAI_MODEL", "gpt-5-mini")
 CHAT_OPENAI_TIMEOUT_SEC = int(os.getenv("CHAT_OPENAI_TIMEOUT_SEC", "90"))
 CHAT_TEMPERATURE = float(os.getenv("CHAT_TEMPERATURE", "0.3"))
 # 질의 1건에서 분석할 티커 최대 수 (과도한 yfinance 호출 방지)
@@ -283,4 +284,17 @@ CHAT_MARKET_KEYWORDS = frozenset({
     "시장", "market", "매크로", "macro", "전망", "outlook",
     "섹터", "sector", "지수", "index", "나스닥", "nasdaq",
     "s&p", "sp500", "다우", "dow", "vix", "금리",
+})
+
+# 기술적 지표(RSI/MACD/볼린저/MA 등) 수집 여부 판단 키워드.
+# 없으면 기본적으로 기술적 지표 계산을 스킵해 응답 속도를 확보한다.
+# 매수/매도/진입/타이밍 질의는 기술적 지표가 근거에 필수 → 포함.
+CHAT_TECHNICAL_KEYWORDS = frozenset({
+    # 지표·차트 용어
+    "기술적", "기술지표", "차트", "rsi", "macd", "볼린저", "bollinger",
+    "이동평균", "moving average", "골든크로스", "데드크로스",
+    "지지", "저항", "support", "resistance", "atr", "과매수", "과매도",
+    # 매매 의사결정 관련 — 기술적 근거 필요
+    "사도", "팔도", "매수", "매도", "진입", "entry", "타점", "타이밍",
+    "손절", "익절", "stop", "target", "목표가", "전략",
 })

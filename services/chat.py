@@ -5,6 +5,12 @@ AI 챗봇 서비스 (종목 질의, SSE 스트리밍).
 티커/섹터 의도를 추출하고, 프로젝트 내 기존 데이터 소스를 컨텍스트로 주입해
 OpenAI로 한국어 답변을 스트리밍한다.
 
+응답 속도 확보 전략:
+  - 기술적 지표(RSI/MACD/볼린저/MA)는 질의에 기술적 키워드가 있을 때만 계산
+    (`compute_technicals`는 yfinance 6개월치 download로 가장 무거움)
+  - 수집 단계별 `stage` 이벤트를 스트리밍해 체감 속도 개선
+  - 기본 모델은 `gpt-5-mini` (TTFT 빠름 — config로 override)
+
 컨텍스트 소스(기존 서비스 재사용):
   - `services.stock_detail.fetch_quote`   : 실시간 시세
   - `services.technicals.compute_technicals` : RSI/MACD/볼린저/지지·저항 등
@@ -33,6 +39,7 @@ from config import (
     CHAT_NEWS_PER_TICKER,
     CHAT_OPENAI_MODEL,
     CHAT_OPENAI_TIMEOUT_SEC,
+    CHAT_TECHNICAL_KEYWORDS,
     CHAT_TEMPERATURE,
     CHAT_USER_MESSAGE_MAX_CHARS,
     OPENAI_API_KEY,
@@ -135,33 +142,17 @@ def _is_market_query(text: str) -> bool:
     return any(kw.lower() in lowered for kw in CHAT_MARKET_KEYWORDS)
 
 
+def _should_include_technicals(text: str) -> bool:
+    """기술적 지표 수집 여부. 매매/차트 관련 키워드가 있으면 True."""
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(kw.lower() in lowered for kw in CHAT_TECHNICAL_KEYWORDS)
+
+
 # ---------------------------------------------------------------------------
-# 컨텍스트 수집
+# 컨텍스트 수집 (stage 단위로 분리)
 # ---------------------------------------------------------------------------
-
-async def _gather_one_stock(ticker: str) -> dict[str, Any]:
-    """단일 종목의 시세·기술적 지표·뉴스를 병렬 수집한다. 실패 시 부분 결과 반환."""
-    quote_task = asyncio.to_thread(fetch_quote, ticker)
-    tech_task = asyncio.to_thread(compute_technicals, ticker)
-    news_task = build_stock_news_feed(ticker, limit=CHAT_NEWS_PER_TICKER, refresh=False)
-
-    quote, technicals, news = await asyncio.gather(
-        quote_task, tech_task, news_task, return_exceptions=True,
-    )
-
-    def _ok(v: Any) -> Any:
-        if isinstance(v, Exception):
-            logger.debug("chat context 수집 부분 실패 (%s): %s", ticker, v)
-            return None
-        return v
-
-    return {
-        "ticker": ticker,
-        "quote": _ok(quote),
-        "technicals": _ok(technicals),
-        "news": _ok(news) or [],
-    }
-
 
 def _compact_quote(quote: dict[str, Any] | None) -> dict[str, Any] | None:
     if not quote:
@@ -217,71 +208,70 @@ def _compact_macro(macro: dict[str, Any] | None) -> list[dict[str, Any]]:
     return out
 
 
-async def gather_chat_context(
-    user_message: str,
-    explicit_tickers: list[str] | None = None,
-) -> dict[str, Any]:
-    """
-    사용자 질의에 맞는 컨텍스트를 수집한다.
-    - 티커 질의: 종목별 quote/technicals/news
-    - 시장 질의: macro + market_gauge + news_feed + strategy
-    - 혼합: 양쪽 모두 포함
-    """
-    tickers = explicit_tickers or extract_tickers(user_message)
-    tickers = tickers[:CHAT_MAX_TICKERS_PER_QUERY]
+async def _fetch_quote_and_news(ticker: str) -> dict[str, Any]:
+    """시세 + 뉴스만 병렬 수집 (기술적 지표는 별도 단계에서)."""
+    quote_task = asyncio.to_thread(fetch_quote, ticker)
+    news_task = build_stock_news_feed(ticker, limit=CHAT_NEWS_PER_TICKER, refresh=False)
+    quote, news = await asyncio.gather(quote_task, news_task, return_exceptions=True)
 
-    context: dict[str, Any] = {
-        "tickers": tickers,
-        "stocks": [],
-        "macro": _compact_macro(latest_cache.get("macro")),
-        "market_gauge": latest_cache.get("market_gauge"),
-        "vix": latest_cache.get("vix"),
-        "market_news": [],
-        "strategy_summary": None,
+    def _ok(v: Any) -> Any:
+        if isinstance(v, Exception):
+            logger.debug("chat quote/news 부분 실패 (%s): %s", ticker, v)
+            return None
+        return v
+
+    return {
+        "ticker": ticker,
+        "quote": _compact_quote(_ok(quote)),
+        "technicals": None,
+        "news": _compact_news(_ok(news), CHAT_NEWS_PER_TICKER),
     }
 
-    # 1) 종목별 컨텍스트
-    if tickers:
-        results = await asyncio.gather(
-            *[_gather_one_stock(t) for t in tickers],
-            return_exceptions=True,
+
+async def _augment_with_technicals(stocks: list[dict[str, Any]]) -> int:
+    """in-place로 각 종목에 기술적 지표를 추가한다. 성공 개수 반환."""
+    if not stocks:
+        return 0
+    tasks = [asyncio.to_thread(compute_technicals, s["ticker"]) for s in stocks]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    ok = 0
+    for stock, tech in zip(stocks, results):
+        if isinstance(tech, Exception):
+            logger.debug("chat technicals 실패 (%s): %s", stock.get("ticker"), tech)
+            continue
+        compact = _compact_technicals(tech)
+        if compact:
+            stock["technicals"] = compact
+            ok += 1
+    return ok
+
+
+async def _gather_market_block() -> dict[str, Any]:
+    """시장 뉴스 + 전략 브리핑 (캐시 히트 기대)."""
+    news_feed = latest_cache.get("news_feed") or []
+    out: dict[str, Any] = {
+        "market_news": _compact_news(news_feed, CHAT_MARKET_NEWS_LIMIT),
+        "strategy_summary": None,
+    }
+    try:
+        from services.strategist import get_cached_market_strategy
+        strategy = await get_cached_market_strategy(
+            latest_cache.get("macro"),
+            latest_cache.get("market_gauge"),
+            latest_cache.get("vix"),
+            news_feed,
         )
-        for r in results:
-            if isinstance(r, Exception):
-                logger.debug("chat 종목 컨텍스트 실패: %s", r)
-                continue
-            context["stocks"].append({
-                "ticker": r["ticker"],
-                "quote": _compact_quote(r["quote"]),
-                "technicals": _compact_technicals(r["technicals"]),
-                "news": _compact_news(r["news"], CHAT_NEWS_PER_TICKER),
-            })
-
-    # 2) 시장 전체 질의 → 전략 브리핑 + 시장 뉴스
-    if _is_market_query(user_message) or not tickers:
-        news_feed = latest_cache.get("news_feed") or []
-        context["market_news"] = _compact_news(news_feed, CHAT_MARKET_NEWS_LIMIT)
-
-        try:
-            from services.strategist import get_cached_market_strategy
-            strategy = await get_cached_market_strategy(
-                latest_cache.get("macro"),
-                latest_cache.get("market_gauge"),
-                latest_cache.get("vix"),
-                news_feed,
-            )
-            context["strategy_summary"] = {
-                "market_regime": strategy.get("market_regime"),
-                "market_summary": strategy.get("market_summary"),
-                "sector_rotation": strategy.get("sector_rotation"),
-                "news_themes": (strategy.get("news_themes") or [])[:5],
-                "risk_warnings": strategy.get("risk_warnings") or [],
-                "fear_greed": strategy.get("fear_greed"),
-            }
-        except Exception as e:
-            logger.debug("chat 전략 브리핑 수집 실패: %s", e)
-
-    return context
+        out["strategy_summary"] = {
+            "market_regime": strategy.get("market_regime"),
+            "market_summary": strategy.get("market_summary"),
+            "sector_rotation": strategy.get("sector_rotation"),
+            "news_themes": (strategy.get("news_themes") or [])[:5],
+            "risk_warnings": strategy.get("risk_warnings") or [],
+            "fear_greed": strategy.get("fear_greed"),
+        }
+    except Exception as e:
+        logger.debug("chat 전략 브리핑 수집 실패: %s", e)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +285,7 @@ _SYSTEM_PROMPT = """\
 
 ## 입력 컨텍스트
 사용자 메시지와 함께 `context` JSON이 주어진다. 구성:
-- `stocks[]`: 종목별 { quote(시세), technicals(RSI/MACD/볼린저/MA/지지저항), news[](FinBERT 감성 포함) }
+- `stocks[]`: 종목별 { quote(시세), technicals(RSI/MACD/볼린저/MA/지지저항, 없을 수도 있음), news[](FinBERT 감성 포함) }
 - `macro`: 주요 지수·환율·금리·VIX 현재값
 - `market_gauge` (0~100), `vix`
 - `market_news[]`: 시장 전체 뉴스 헤드라인
@@ -305,6 +295,7 @@ _SYSTEM_PROMPT = """\
 1. 주어진 context에서 확인 가능한 수치를 **반드시 구체적으로 인용**한다.
    예: "NVDA는 현재 $112.3 (+2.1%), RSI 58로 중립 구간이며 MACD 골든크로스가 진행 중이다."
 2. context에 없는 데이터는 추측하지 말고, "해당 데이터가 부족하다" 라고 밝힌다.
+   특히 `technicals`가 null이면 기술적 지표 없이 시세·뉴스·시장 상황만으로 답한다.
 3. 매수/매도/관망 의견을 낼 때는 **기술적 근거 + 뉴스 감성 + 시장 국면**을 종합한다.
 4. 답변 구조:
    - 한 줄 결론 (예: "현재 진입은 다소 부담, 눌림 기다리는 편이 낫다")
@@ -363,7 +354,8 @@ async def stream_chat(
 
     SSE 이벤트:
       - start    : 파이프라인 시작 (질의, 추출된 티커)
-      - context  : 수집된 컨텍스트 요약 (UI가 배지/칩으로 표시 가능)
+      - stage    : 단계별 진행 상황 (name, status, elapsed_ms 등)
+      - context  : 수집된 컨텍스트 최종 요약 (UI가 배지/칩으로 표시 가능)
       - token    : LLM 토큰 (delta 텍스트)
       - done     : 최종 전체 텍스트 + 경과 시간
       - error    : 오류
@@ -386,23 +378,94 @@ async def stream_chat(
         "history_len": len(history),
     })
 
-    # 1) 컨텍스트 수집
-    try:
-        context = await gather_chat_context(user_message, explicit_tickers=tickers_override)
-    except Exception as e:
-        logger.warning("chat 컨텍스트 수집 실패: %s", e, exc_info=True)
-        context = {
-            "tickers": tickers_override or [],
-            "stocks": [],
-            "macro": [],
-            "market_news": [],
-            "strategy_summary": None,
-            "_partial_error": str(e),
-        }
+    # --- 계획 수립: 무엇을 수집할지 결정 ---
+    tickers = (tickers_override or extract_tickers(user_message))[:CHAT_MAX_TICKERS_PER_QUERY]
+    include_technicals = _should_include_technicals(user_message)
+    include_market = _is_market_query(user_message) or not tickers
 
-    # 컨텍스트 요약 이벤트 (프론트 UX용: 어떤 데이터로 답변했는지 보여주기)
+    yield _sse("stage", {
+        "name": "plan",
+        "status": "done",
+        "tickers": tickers,
+        "include_technicals": include_technicals,
+        "include_market": include_market,
+    })
+
+    context: dict[str, Any] = {
+        "tickers": tickers,
+        "stocks": [],
+        "macro": _compact_macro(latest_cache.get("macro")),
+        "market_gauge": latest_cache.get("market_gauge"),
+        "vix": latest_cache.get("vix"),
+        "market_news": [],
+        "strategy_summary": None,
+    }
+
+    # --- Stage 1: 종목 시세 + 뉴스 (병렬) ---
+    if tickers:
+        stage_start = time.time()
+        yield _sse("stage", {"name": "stocks", "status": "loading", "count": len(tickers)})
+        try:
+            results = await asyncio.gather(
+                *[_fetch_quote_and_news(t) for t in tickers],
+                return_exceptions=True,
+            )
+            context["stocks"] = [r for r in results if not isinstance(r, Exception)]
+        except Exception as e:
+            logger.warning("chat 종목 수집 실패: %s", e, exc_info=True)
+        yield _sse("stage", {
+            "name": "stocks",
+            "status": "done",
+            "elapsed_ms": int((time.time() - stage_start) * 1000),
+            "found": [
+                {
+                    "ticker": s.get("ticker"),
+                    "name": (s.get("quote") or {}).get("name"),
+                    "price": (s.get("quote") or {}).get("price"),
+                    "change_pct": (s.get("quote") or {}).get("change_pct"),
+                    "news_count": len(s.get("news") or []),
+                }
+                for s in context["stocks"]
+            ],
+        })
+
+    # --- Stage 2: 기술적 지표 (조건부) ---
+    if include_technicals and context["stocks"]:
+        stage_start = time.time()
+        yield _sse("stage", {"name": "technicals", "status": "loading"})
+        try:
+            ok = await _augment_with_technicals(context["stocks"])
+        except Exception as e:
+            logger.warning("chat 기술적 지표 수집 실패: %s", e, exc_info=True)
+            ok = 0
+        yield _sse("stage", {
+            "name": "technicals",
+            "status": "done",
+            "elapsed_ms": int((time.time() - stage_start) * 1000),
+            "count": ok,
+        })
+
+    # --- Stage 3: 시장 컨텍스트 (조건부) ---
+    if include_market:
+        stage_start = time.time()
+        yield _sse("stage", {"name": "market", "status": "loading"})
+        try:
+            market = await _gather_market_block()
+            context["market_news"] = market["market_news"]
+            context["strategy_summary"] = market["strategy_summary"]
+        except Exception as e:
+            logger.warning("chat 시장 컨텍스트 수집 실패: %s", e, exc_info=True)
+        yield _sse("stage", {
+            "name": "market",
+            "status": "done",
+            "elapsed_ms": int((time.time() - stage_start) * 1000),
+            "has_strategy": context["strategy_summary"] is not None,
+            "news_count": len(context["market_news"]),
+        })
+
+    # --- 컨텍스트 요약 이벤트 (프론트 UX용) ---
     yield _sse("context", {
-        "tickers": context.get("tickers", []),
+        "tickers": context["tickers"],
         "stocks_found": [
             {
                 "ticker": s.get("ticker"),
@@ -412,13 +475,15 @@ async def stream_chat(
                 "has_technicals": s.get("technicals") is not None,
                 "news_count": len(s.get("news") or []),
             }
-            for s in context.get("stocks", [])
+            for s in context["stocks"]
         ],
-        "has_strategy": context.get("strategy_summary") is not None,
-        "market_news_count": len(context.get("market_news") or []),
+        "has_strategy": context["strategy_summary"] is not None,
+        "market_news_count": len(context["market_news"]),
     })
 
-    # 2) LLM 스트리밍
+    # --- Stage 4: LLM 스트리밍 ---
+    yield _sse("stage", {"name": "llm", "status": "loading", "model": CHAT_OPENAI_MODEL})
+
     context_json = json.dumps(sanitize_for_json(context), ensure_ascii=False)
     llm_messages: list[dict[str, str]] = [
         {"role": "system", "content": _SYSTEM_PROMPT},
@@ -435,7 +500,7 @@ async def stream_chat(
         },
     ]
 
-    model = CHAT_OPENAI_MODEL or "gpt-5"
+    model = CHAT_OPENAI_MODEL or "gpt-5-mini"
 
     def _create_stream() -> Any:
         kwargs: dict[str, Any] = {
@@ -455,6 +520,7 @@ async def stream_chat(
         return
 
     full_text = ""
+    first_token_ts: float | None = None
     try:
         for chunk in stream:
             if not chunk.choices:
@@ -463,6 +529,13 @@ async def stream_chat(
             if not delta or not delta.content:
                 continue
             text = delta.content
+            if first_token_ts is None:
+                first_token_ts = time.time()
+                yield _sse("stage", {
+                    "name": "llm",
+                    "status": "first_token",
+                    "ttft_ms": int((first_token_ts - start_ts) * 1000),
+                })
             full_text += text
             yield _sse("token", {"content": text})
     except Exception as e:
@@ -473,5 +546,6 @@ async def stream_chat(
     yield _sse("done", {
         "answer": full_text,
         "elapsed_sec": round(time.time() - start_ts, 2),
+        "ttft_ms": int((first_token_ts - start_ts) * 1000) if first_token_ts else None,
         "model": model,
     })
