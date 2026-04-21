@@ -24,6 +24,7 @@ from services.news_feed import build_news_feed
 from routers import market, stock
 from routers import strategy
 from routers import news
+from routers import chat
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,8 @@ async def lifespan(app: FastAPI):
     news_task.cancel()
 
 
+
+
 app = FastAPI(lifespan=lifespan, title="Woochan AI Quant Terminal API")
 
 app.add_middleware(
@@ -91,6 +94,7 @@ app.include_router(market.router)
 app.include_router(stock.router)
 app.include_router(strategy.router)
 app.include_router(news.router)
+app.include_router(chat.router)
 
 
 @app.websocket("/ws/market")

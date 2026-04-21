@@ -237,3 +237,50 @@ RISK_HISTORY_PERIOD = os.getenv("RISK_HISTORY_PERIOD", "1y")
 
 # XAI 에이전트 온도 (설명 품질용 — 약간 높게)
 XAI_AGENT_TEMPERATURE = float(os.getenv("XAI_AGENT_TEMPERATURE", "0.4"))
+
+# ---------------------------------------------------------------------------
+# AI Chat (종목 질의 챗봇, SSE 스트리밍)
+# ---------------------------------------------------------------------------
+CHAT_OPENAI_MODEL = os.getenv("CHAT_OPENAI_MODEL", "gpt-5")
+CHAT_OPENAI_TIMEOUT_SEC = int(os.getenv("CHAT_OPENAI_TIMEOUT_SEC", "90"))
+CHAT_TEMPERATURE = float(os.getenv("CHAT_TEMPERATURE", "0.3"))
+# 질의 1건에서 분석할 티커 최대 수 (과도한 yfinance 호출 방지)
+CHAT_MAX_TICKERS_PER_QUERY = int(os.getenv("CHAT_MAX_TICKERS_PER_QUERY", "3"))
+# 티커별 컨텍스트에 포함할 뉴스 개수
+CHAT_NEWS_PER_TICKER = int(os.getenv("CHAT_NEWS_PER_TICKER", "5"))
+# 시장 전체 질의일 때 포함할 헤드라인 수
+CHAT_MARKET_NEWS_LIMIT = int(os.getenv("CHAT_MARKET_NEWS_LIMIT", "8"))
+# 대화 이력 최근 N턴만 LLM에 전달 (컨텍스트 크기 제어)
+CHAT_MAX_HISTORY_MESSAGES = int(os.getenv("CHAT_MAX_HISTORY_MESSAGES", "12"))
+# 사용자 메시지 길이 제한 (토큰/남용 방지)
+CHAT_USER_MESSAGE_MAX_CHARS = int(os.getenv("CHAT_USER_MESSAGE_MAX_CHARS", "2000"))
+
+# 한글 종목명 → 티커 매핑 (질의 자연어 인식용)
+# 대표 종목만 등록하고, 정확한 티커는 사용자가 영문 대문자로 입력해도 된다.
+CHAT_KO_NAME_TO_TICKER: dict[str, str] = {
+    "엔비디아": "NVDA",
+    "애플": "AAPL",
+    "마이크로소프트": "MSFT",
+    "테슬라": "TSLA",
+    "구글": "GOOGL",
+    "알파벳": "GOOGL",
+    "메타": "META",
+    "아마존": "AMZN",
+    "넷플릭스": "NFLX",
+    "amd": "AMD",
+    "인텔": "INTC",
+    "퀄컴": "QCOM",
+    "브로드컴": "AVGO",
+    "팔란티어": "PLTR",
+    "버크셔": "BRK-B",
+    "비트코인": "BTC-USD",
+    "이더리움": "ETH-USD",
+}
+
+# 챗봇이 특수 분석 없이 답해도 되는 일반 질의 감지용 키워드
+# (시장 전체, 섹터, 매크로 관련)
+CHAT_MARKET_KEYWORDS = frozenset({
+    "시장", "market", "매크로", "macro", "전망", "outlook",
+    "섹터", "sector", "지수", "index", "나스닥", "nasdaq",
+    "s&p", "sp500", "다우", "dow", "vix", "금리",
+})
