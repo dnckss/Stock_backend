@@ -34,6 +34,8 @@ from config import (
     BACKTEST_DEFAULT_HORIZONS,
     BACKTEST_DEFAULT_LOOKBACK_DAYS,
     BACKTEST_DIVERGENCE_BUCKETS,
+    BACKTEST_LIVE_CACHE_TTL_SEC,
+    BACKTEST_LIVE_POSITIONS_PER_HORIZON,
     BACKTEST_MAX_HORIZON_DAYS,
     BACKTEST_MAX_LOOKBACK_DAYS,
     BACKTEST_MIN_SAMPLES,
@@ -751,3 +753,224 @@ async def run_summary(
             "headlines": [_pick_headline(strat, h) for h in hs],
         },
     })
+
+
+# ---------------------------------------------------------------------------
+# Live (진행 중) 포지션 — horizon 미달 레코드의 현재가 mark-to-market
+# ---------------------------------------------------------------------------
+
+def _latest_close(close_df: pd.DataFrame, ticker: str) -> tuple[float | None, date | None]:
+    """티커의 가장 최근 유효 종가와 날짜."""
+    if ticker not in close_df.columns or close_df.empty:
+        return None, None
+    series = close_df[ticker].dropna()
+    if series.empty:
+        return None, None
+    last_val = float(series.iloc[-1])
+    if not math.isfinite(last_val):
+        return None, None
+    last_idx = series.index[-1]
+    if hasattr(last_idx, "date"):
+        return last_val, last_idx.date()
+    return last_val, None
+
+
+def _elapsed_trading_days(
+    close_df: pd.DataFrame,
+    ticker: str,
+    entry_dt: datetime,
+) -> int:
+    """entry_dt 이후 지금까지 경과한 거래일 수."""
+    if ticker not in close_df.columns or close_df.empty:
+        return 0
+    series = close_df[ticker].dropna()
+    if series.empty:
+        return 0
+    idx = series.index
+    if not isinstance(idx, pd.DatetimeIndex):
+        try:
+            idx = pd.DatetimeIndex(idx)
+        except Exception:
+            return 0
+    return int((idx.date > entry_dt.date()).sum())
+
+
+def _compute_live_positions(
+    records: list[dict],
+    close_df: pd.DataFrame,
+    horizons: list[int],
+    *,
+    direction_key: str,
+    price_key: str,
+    extra_fields: list[str],
+) -> dict[str, dict[str, Any]]:
+    """
+    horizon별로 '아직 완료되지 않은(open)' 포지션을 수집해 현재가 대비 mark-to-market.
+    동일 레코드가 여러 horizon에 걸쳐 open일 수 있으므로 각 horizon 블록에 개별 추가.
+    """
+    per_horizon: dict[int, list[dict[str, Any]]] = {h: [] for h in horizons}
+
+    for r in records:
+        ticker = (r.get("ticker") or "").upper().strip()
+        entry_price = _safe_float(r.get(price_key))
+        entry_dt = _parse_iso(r.get("created_at"))
+        direction = (r.get(direction_key) or "").upper().strip()
+        if not ticker or entry_price is None or entry_price <= 0 or entry_dt is None:
+            continue
+        if direction not in ("BUY", "SELL"):
+            continue
+
+        current_price, current_date = _latest_close(close_df, ticker)
+        if current_price is None:
+            continue
+        elapsed = _elapsed_trading_days(close_df, ticker, entry_dt)
+
+        raw_return = (current_price - entry_price) / entry_price * 100.0
+        adjusted = raw_return if direction == "BUY" else -raw_return
+
+        base_position = {
+            "ticker": ticker,
+            "direction": direction,
+            "entry_date": entry_dt.date().isoformat(),
+            "entry_price": _round(entry_price, 4),
+            "current_price": _round(current_price, 4),
+            "current_date": current_date.isoformat() if current_date else None,
+            "unrealized_raw_pct": _round(raw_return, 2),
+            "unrealized_adjusted_pct": _round(adjusted, 2),
+            "elapsed_trading_days": elapsed,
+            **{k: r.get(k) for k in extra_fields if r.get(k) is not None},
+        }
+
+        for h in horizons:
+            if elapsed >= h:
+                # 이 horizon은 이미 완료 — open 아님
+                continue
+            pos = {
+                **base_position,
+                "horizon": h,
+                "remaining_trading_days": max(0, h - elapsed),
+                "progress_pct": _round(elapsed / h * 100, 1) if h > 0 else None,
+            }
+            per_horizon[h].append(pos)
+
+    # 진행 최신 순(엔트리 최근 순) 정렬 + 개수 상한
+    results: dict[str, dict[str, Any]] = {}
+    for h in horizons:
+        positions = per_horizon[h]
+        positions.sort(key=lambda p: p.get("entry_date") or "", reverse=True)
+        capped = positions[:BACKTEST_LIVE_POSITIONS_PER_HORIZON]
+        returns = [p["unrealized_adjusted_pct"] for p in positions if p.get("unrealized_adjusted_pct") is not None]
+        overall = _compute_metrics(returns)
+        # hit_rate 키 이름을 문맥에 맞게 바꿔 복사
+        overall_open = {
+            **overall,
+            "hit_rate_so_far_pct": overall.get("hit_rate_pct"),
+            "avg_unrealized_pct": overall.get("avg_return_pct"),
+        }
+        results[str(h)] = {
+            "horizon": h,
+            "open_count": len(positions),
+            "returned_count": len(capped),
+            "overall": overall_open,
+            "by_direction": {
+                d: _compute_metrics([
+                    p["unrealized_adjusted_pct"] for p in positions
+                    if p.get("direction") == d and p.get("unrealized_adjusted_pct") is not None
+                ])
+                for d in ("BUY", "SELL")
+            },
+            "positions": capped,
+        }
+    return results
+
+
+def _run_live_sync(lookback_days: int, horizons: list[int]) -> dict[str, Any]:
+    started = time.time()
+
+    # 두 소스 모두 최근 lookback 기간치만 조회. horizon 이상 지난 레코드는 어차피 스킵됨.
+    signals_records = get_analysis_records_for_backtest(lookback_days)
+    strategy_rows = get_strategy_records_for_backtest(lookback_days)
+    strategy_records = [_enrich_strategy_entry(dict(r)) for r in strategy_rows]
+
+    # 두 소스 티커 합쳐서 단일 가격 다운로드
+    merged_for_prices: list[dict] = []
+    merged_for_prices.extend(signals_records)
+    merged_for_prices.extend(strategy_records)
+    close_df = _download_prices_for(merged_for_prices)
+
+    signals_live = _compute_live_positions(
+        signals_records, close_df, horizons,
+        direction_key="signal", price_key="price",
+        extra_fields=["signal_source", "divergence", "sentiment"],
+    )
+    strategist_live = _compute_live_positions(
+        strategy_records, close_df, horizons,
+        direction_key="direction", price_key="price",
+        extra_fields=["confidence", "strategy_type", "market_regime",
+                      "stop_loss", "target1_price", "target2_price", "risk_reward_ratio"],
+    )
+
+    return {
+        "lookback_days": lookback_days,
+        "horizons": horizons,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "elapsed_sec": round(time.time() - started, 2),
+        "signals_live": {
+            "source": "analysis_results",
+            "total_open": sum(v["open_count"] for v in signals_live.values()),
+            "results": signals_live,
+        },
+        "strategist_live": {
+            "source": "strategy_history",
+            "total_open": sum(v["open_count"] for v in strategist_live.values()),
+            "results": strategist_live,
+        },
+    }
+
+
+# 라이브 뷰는 별도 캐시(짧은 TTL) 사용
+_live_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def _live_cache_get(key: str) -> dict[str, Any] | None:
+    entry = _live_cache.get(key)
+    if not entry:
+        return None
+    ts, data = entry
+    if time.time() - ts > BACKTEST_LIVE_CACHE_TTL_SEC:
+        _live_cache.pop(key, None)
+        return None
+    return data
+
+
+def _live_cache_put(key: str, data: dict[str, Any]) -> None:
+    _live_cache[key] = (time.time(), data)
+
+
+async def run_live_positions(
+    lookback_days: int | None = None,
+    horizons: Iterable[int] | None = None,
+    *,
+    refresh: bool = False,
+) -> dict[str, Any]:
+    """
+    현재 진행 중(open) 포지션 — horizon 미달 레코드의 현재가 mark-to-market.
+
+    signals(대시보드) + strategist(AI 전략실) 두 소스를 한 번에 반환한다.
+    캐시 TTL은 BACKTEST_LIVE_CACHE_TTL_SEC(기본 1분).
+    """
+    hs = _normalize_horizons(horizons)
+    # 기본 lookback: 최대 horizon * 2 (오래된 건 어차피 elapsed >= h 로 자동 제외)
+    default_lb = max(hs) * 2 if hs else BACKTEST_DEFAULT_LOOKBACK_DAYS
+    lb = _sanitize_lookback(lookback_days or default_lb)
+
+    key = _cache_key("live", lb, hs)
+    if not refresh:
+        cached = _live_cache_get(key)
+        if cached is not None:
+            return cached
+
+    result = await asyncio.to_thread(_run_live_sync, lb, hs)
+    sanitized = sanitize_for_json(result)
+    _live_cache_put(key, sanitized)
+    return sanitized

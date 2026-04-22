@@ -248,6 +248,10 @@ BACKTEST_DEFAULT_HORIZONS = [1, 5, 20]
 BACKTEST_MAX_HORIZON_DAYS = int(os.getenv("BACKTEST_MAX_HORIZON_DAYS", "60"))
 # 프로세스 내 결과 캐시 TTL
 BACKTEST_CACHE_TTL_SEC = int(os.getenv("BACKTEST_CACHE_TTL_SEC", "600"))  # 10분
+# 진행 중(open) 포지션 라이브 뷰 — 현재가 자주 변동 → 짧은 TTL
+BACKTEST_LIVE_CACHE_TTL_SEC = int(os.getenv("BACKTEST_LIVE_CACHE_TTL_SEC", "60"))  # 1분
+# 진행 중 포지션 응답에 포함할 포지션 상한 (horizon별)
+BACKTEST_LIVE_POSITIONS_PER_HORIZON = int(os.getenv("BACKTEST_LIVE_POSITIONS_PER_HORIZON", "200"))
 # 버킷 통계 산출 시 최소 표본 수 (미달 시 버킷 결과 생략)
 BACKTEST_MIN_SAMPLES = int(os.getenv("BACKTEST_MIN_SAMPLES", "5"))
 # 연환산 계수 (Sharpe 계산) — US 거래일 기준

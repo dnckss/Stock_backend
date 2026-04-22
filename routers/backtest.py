@@ -23,6 +23,7 @@ from config import (
     BACKTEST_MAX_LOOKBACK_DAYS,
 )
 from services.backtest import (
+    run_live_positions,
     run_signals_backtest,
     run_strategist_backtest,
     run_summary,
@@ -117,3 +118,31 @@ async def api_backtest_summary(
     except Exception as e:
         logger.exception("summary 백테스트 실패: %s", e)
         raise HTTPException(status_code=500, detail=f"summary 백테스트 실패: {e}")
+
+
+@router.get("/backtest/live")
+async def api_backtest_live(
+    lookback_days: int | None = Query(
+        default=None,
+        ge=1,
+        le=BACKTEST_MAX_LOOKBACK_DAYS,
+        description="최근 며칠치 레코드를 스캔할지. 미지정 시 max(horizons)*2.",
+    ),
+    horizons: str = Query(default=_DEFAULT_HORIZONS_STR),
+    refresh: int = Query(default=0, description="1이면 캐시 무시"),
+):
+    """
+    진행 중(open) 포지션 라이브 뷰 — horizon 미달이라 완료 백테스트에서 제외되는
+    최근 레코드를 현재가로 mark-to-market한다.
+
+    응답:
+      - signals_live:    analysis_results(대시보드 시그널) 기반 open 포지션
+      - strategist_live: strategy_history(AI 전략실 추천) 기반 open 포지션
+      각 source.results[horizon] 에 overall/by_direction 요약 + positions 리스트.
+    """
+    hs = _parse_horizons(horizons)
+    try:
+        return await run_live_positions(lookback_days, hs, refresh=bool(refresh))
+    except Exception as e:
+        logger.exception("live 백테스트 실패: %s", e)
+        raise HTTPException(status_code=500, detail=f"live 백테스트 실패: {e}")
