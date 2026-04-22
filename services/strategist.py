@@ -822,6 +822,48 @@ def _assemble_response(
     return sanitize_for_json(result)
 
 
+# 이전 저장 추천 시그니처 (프로세스 내 캐시). 동일 추천 중복 저장 방지.
+_last_saved_rec_signature: str | None = None
+
+
+def _recommendations_signature(recs: list[dict[str, Any]], market_regime: str | None) -> str:
+    """추천 리스트의 핵심 식별 필드로 해시 생성 — 동일하면 재저장 스킵."""
+    parts: list[str] = [str(market_regime or "")]
+    for rec in recs or []:
+        ticker = (rec.get("ticker") or "").upper()
+        direction = rec.get("direction") or ""
+        confidence = rec.get("confidence") or ""
+        stop_loss = rec.get("stop_loss")
+        entry = rec.get("entry_zone") or {}
+        entry_low = entry.get("low")
+        entry_high = entry.get("high")
+        parts.append(f"{ticker}|{direction}|{confidence}|{stop_loss}|{entry_low}|{entry_high}")
+    import hashlib
+    return hashlib.sha1("||".join(parts).encode("utf-8")).hexdigest()
+
+
+async def _persist_recommendations_if_changed(response: dict[str, Any]) -> None:
+    """이전 저장분과 내용이 다를 때만 strategy_history 에 insert."""
+    global _last_saved_rec_signature
+    recs = response.get("recommendations") or []
+    if not recs:
+        return
+    # ticker + direction 최소 필드가 있어야 백테스트 대상
+    valid = [r for r in recs if (r.get("ticker") or "").strip() and r.get("direction")]
+    if not valid:
+        return
+    market_regime = response.get("market_regime")
+    signature = _recommendations_signature(valid, market_regime)
+    if signature == _last_saved_rec_signature:
+        return
+    try:
+        await asyncio.to_thread(save_strategy_history, valid, market_regime)
+        _last_saved_rec_signature = signature
+        logger.info("strategy_history 저장 완료: %d건 (regime=%s)", len(valid), market_regime)
+    except Exception as e:
+        logger.warning("strategy_history 저장 실패: %s", e, exc_info=True)
+
+
 def _fallback_response(rows: list[dict[str, Any]], sector_data: list[dict[str, Any]], exc: BaseException) -> dict[str, Any]:
     logger.warning("OpenAI 전략가 호출 실패, fallback: %s", exc, exc_info=True)
     top_sector_name = (sector_data[0].get("sector") if sector_data else "Unknown") or "Unknown"
@@ -936,6 +978,7 @@ async def build_market_strategy(
 
     technicals_compressed = _compress_technicals_for_llm(technicals) if technicals else None
 
+    is_fallback = False
     try:
         strategy_json = await _call_openai_strategy(
             sector_data, sector_etf, macro, market_gauge, vix,
@@ -943,6 +986,7 @@ async def build_market_strategy(
         )
     except Exception as e:
         strategy_json = _fallback_response(rows, sector_data, e)
+        is_fallback = True
 
     # 코드 계산값을 단일 소스로 사용 (모델 출력 override)
     strategy_json["sector_rotation"] = sector_rotation
@@ -953,7 +997,14 @@ async def build_market_strategy(
         "technicals_coverage": len(technicals) if technicals else 0,
     }
 
-    return _assemble_response(strategy_json, sector_data, sector_etf, technicals, fear_greed)
+    response = _assemble_response(strategy_json, sector_data, sector_etf, technicals, fear_greed)
+
+    # AI 추천을 strategy_history 에 영구 저장 (백테스트용).
+    # fallback 응답은 품질이 낮아 저장하지 않는다.
+    if not is_fallback:
+        await _persist_recommendations_if_changed(response)
+
+    return response
 
 
 async def get_cached_market_strategy(
