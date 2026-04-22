@@ -239,6 +239,30 @@ RISK_HISTORY_PERIOD = os.getenv("RISK_HISTORY_PERIOD", "1y")
 XAI_AGENT_TEMPERATURE = float(os.getenv("XAI_AGENT_TEMPERATURE", "0.4"))
 
 # ---------------------------------------------------------------------------
+# Backtesting (대시보드 시그널 + AI 전략실 추천)
+# ---------------------------------------------------------------------------
+BACKTEST_DEFAULT_LOOKBACK_DAYS = int(os.getenv("BACKTEST_DEFAULT_LOOKBACK_DAYS", "90"))
+BACKTEST_MAX_LOOKBACK_DAYS = int(os.getenv("BACKTEST_MAX_LOOKBACK_DAYS", "365"))
+# 평가 horizon (거래일 기준) — 기본: 1/5/20
+BACKTEST_DEFAULT_HORIZONS = [1, 5, 20]
+BACKTEST_MAX_HORIZON_DAYS = int(os.getenv("BACKTEST_MAX_HORIZON_DAYS", "60"))
+# 프로세스 내 결과 캐시 TTL
+BACKTEST_CACHE_TTL_SEC = int(os.getenv("BACKTEST_CACHE_TTL_SEC", "600"))  # 10분
+# 버킷 통계 산출 시 최소 표본 수 (미달 시 버킷 결과 생략)
+BACKTEST_MIN_SAMPLES = int(os.getenv("BACKTEST_MIN_SAMPLES", "5"))
+# 연환산 계수 (Sharpe 계산) — US 거래일 기준
+BACKTEST_ANNUALIZATION_FACTOR = 252
+# 괴리율(|divergence|) 버킷 (분위수 기반). 0~2.5%, 2.5~6%, 6~13%, 13%+
+BACKTEST_DIVERGENCE_BUCKETS: list[tuple[float, float]] = [
+    (0.0, 0.025),
+    (0.025, 0.06),
+    (0.06, 0.13),
+    (0.13, float("inf")),
+]
+# yfinance 일괄 다운로드 기간 여유(주말/공휴일 대비)
+BACKTEST_PRICE_LOOKAHEAD_DAYS = 14
+
+# ---------------------------------------------------------------------------
 # AI Chat (종목 질의 챗봇, SSE 스트리밍)
 # ---------------------------------------------------------------------------
 # 챗봇은 응답 속도가 중요 — 기본값을 경량 모델로. 품질 우선이면 env로 gpt-5 지정.

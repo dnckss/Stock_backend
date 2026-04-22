@@ -25,6 +25,7 @@ from routers import market, stock
 from routers import strategy
 from routers import news
 from routers import chat
+from routers import backtest
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,7 @@ app.include_router(stock.router)
 app.include_router(strategy.router)
 app.include_router(news.router)
 app.include_router(chat.router)
+app.include_router(backtest.router)
 
 
 @app.websocket("/ws/market")

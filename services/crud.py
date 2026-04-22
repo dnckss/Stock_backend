@@ -115,6 +115,76 @@ def get_all_records(limit: int = 100) -> list:
     return _sanitize(resp.data)
 
 
+_BACKTEST_PAGE_SIZE = 1000
+_BACKTEST_MAX_PAGES = 50  # 최대 50,000건 (안전 상한)
+
+
+def _paginate(query_builder_fn, *, select_cols: str) -> list[dict]:
+    """
+    PostgREST 기본 1000건 제한을 피해 .range()로 페이지네이션해 전체 반환.
+    query_builder_fn(client) 는 .select()/.order() 까지 체이닝된 쿼리를 반환해야 한다.
+    """
+    client = _get_client()
+    collected: list[dict] = []
+    for page in range(_BACKTEST_MAX_PAGES):
+        start = page * _BACKTEST_PAGE_SIZE
+        end = start + _BACKTEST_PAGE_SIZE - 1
+        resp = query_builder_fn(client).range(start, end).execute()
+        rows = resp.data or []
+        collected.extend(rows)
+        if len(rows) < _BACKTEST_PAGE_SIZE:
+            break
+    return collected
+
+
+def get_analysis_records_for_backtest(days: int) -> list[dict]:
+    """
+    백테스팅용 — 과거 N일 이내 analysis_results 중 시그널/가격이 유효한 레코드만.
+    오래된 순으로 정렬(누적 곡선 계산 용이). 페이지네이션으로 1000건 제한 우회.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    cols = (
+        "ticker, price, volume, divergence, sentiment, price_return, "
+        "signal, signal_source, created_at"
+    )
+
+    def _build(client):
+        return (
+            client.table("analysis_results")
+            .select(cols)
+            .gte("created_at", cutoff)
+            .not_.is_("signal", "null")
+            .not_.is_("price", "null")
+            .order("created_at", desc=False)
+        )
+
+    return _sanitize(_paginate(_build, select_cols=cols))
+
+
+def get_strategy_records_for_backtest(days: int) -> list[dict]:
+    """
+    백테스팅용 — 과거 N일 이내 strategy_history 중 direction/entry 유효 레코드만.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    cols = (
+        "id, ticker, direction, confidence, strategy_type, "
+        "entry_low, entry_high, stop_loss, stop_loss_pct, "
+        "target1_price, target2_price, risk_reward_ratio, "
+        "market_regime, created_at"
+    )
+
+    def _build(client):
+        return (
+            client.table("strategy_history")
+            .select(cols)
+            .gte("created_at", cutoff)
+            .not_.is_("direction", "null")
+            .order("created_at", desc=False)
+        )
+
+    return _sanitize(_paginate(_build, select_cols=cols))
+
+
 def get_cached_news_article(url_hash: str) -> dict | None:
     """
     url_hash로 뉴스 본문 캐시를 조회한다.
