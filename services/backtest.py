@@ -732,9 +732,11 @@ async def run_summary(
     lb = _sanitize_lookback(lookback_days)
     hs = _normalize_horizons(horizons)
 
-    signals_task = run_signals_backtest(lb, hs, refresh=refresh)
-    strat_task = run_strategist_backtest(lb, hs, refresh=refresh)
-    signals, strat = await asyncio.gather(signals_task, strat_task)
+    # 순차 실행: 두 작업 모두 Supabase sync client(httpx)를 공유하므로
+    # 병렬(gather)로 띄우면 httpx 커넥션 풀에서 경합해 RemoteProtocolError를 유발할 수 있다.
+    # 각각 결과는 10분 캐시되므로 두 번째 호출부터는 즉시 반환된다.
+    signals = await run_signals_backtest(lb, hs, refresh=refresh)
+    strat = await run_strategist_backtest(lb, hs, refresh=refresh)
 
     return sanitize_for_json({
         "lookback_days": lb,

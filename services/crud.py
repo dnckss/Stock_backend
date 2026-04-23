@@ -22,6 +22,12 @@ def _get_client() -> Client:
     return _supabase
 
 
+def _reset_client() -> None:
+    """httpx 연결 오류 등 이후 다음 호출에서 새 client/커넥션을 만들도록 리셋."""
+    global _supabase
+    _supabase = None
+
+
 def sanitize_for_json(obj):
     """dict/list 내 float NaN·Inf를 None으로 치환해 JSON 직렬화 시 500 방지."""
     if isinstance(obj, dict):
@@ -117,20 +123,62 @@ def get_all_records(limit: int = 100) -> list:
 
 _BACKTEST_PAGE_SIZE = 1000
 _BACKTEST_MAX_PAGES = 50  # 최대 50,000건 (안전 상한)
+_BACKTEST_PAGE_MAX_RETRIES = 3
+_BACKTEST_PAGE_RETRY_BASE_SEC = 0.5
 
 
 def _paginate(query_builder_fn, *, select_cols: str) -> list[dict]:
     """
     PostgREST 기본 1000건 제한을 피해 .range()로 페이지네이션해 전체 반환.
     query_builder_fn(client) 는 .select()/.order() 까지 체이닝된 쿼리를 반환해야 한다.
+
+    httpx.RemoteProtocolError/ReadError 등 일시적 네트워크 오류에는 지수 백오프로
+    재시도하고, 최종 실패 시 지금까지 수집된 부분 결과를 반환한다(전체 실패 대신).
     """
-    client = _get_client()
+    import time
+    import httpx
+
     collected: list[dict] = []
     for page in range(_BACKTEST_MAX_PAGES):
         start = page * _BACKTEST_PAGE_SIZE
         end = start + _BACKTEST_PAGE_SIZE - 1
-        resp = query_builder_fn(client).range(start, end).execute()
-        rows = resp.data or []
+
+        rows: list[dict] | None = None
+        last_exc: Exception | None = None
+        for attempt in range(_BACKTEST_PAGE_MAX_RETRIES):
+            try:
+                client = _get_client()
+                resp = query_builder_fn(client).range(start, end).execute()
+                rows = resp.data or []
+                break
+            except (
+                httpx.RemoteProtocolError,
+                httpx.ReadError,
+                httpx.WriteError,
+                httpx.ConnectError,
+                httpx.ReadTimeout,
+                httpx.ConnectTimeout,
+            ) as e:
+                last_exc = e
+                logger.warning(
+                    "paginate page=%d attempt=%d 네트워크 오류(%s): %s",
+                    page, attempt, type(e).__name__, e,
+                )
+                _reset_client()
+                time.sleep(_BACKTEST_PAGE_RETRY_BASE_SEC * (2 ** attempt))
+            except Exception as e:
+                # PostgREST APIError 등 — 재시도해도 동일하면 바로 중단
+                last_exc = e
+                logger.warning("paginate page=%d attempt=%d API 오류: %s", page, attempt, e)
+                time.sleep(_BACKTEST_PAGE_RETRY_BASE_SEC * (2 ** attempt))
+
+        if rows is None:
+            logger.error(
+                "paginate page=%d 최종 실패 — 지금까지 수집 %d건으로 진행: %s",
+                page, len(collected), last_exc,
+            )
+            break
+
         collected.extend(rows)
         if len(rows) < _BACKTEST_PAGE_SIZE:
             break
