@@ -246,8 +246,16 @@ BACKTEST_MAX_LOOKBACK_DAYS = int(os.getenv("BACKTEST_MAX_LOOKBACK_DAYS", "365"))
 # 평가 horizon (거래일 기준) — 기본: 1/5/20
 BACKTEST_DEFAULT_HORIZONS = [1, 5, 20]
 BACKTEST_MAX_HORIZON_DAYS = int(os.getenv("BACKTEST_MAX_HORIZON_DAYS", "60"))
-# 프로세스 내 결과 캐시 TTL
-BACKTEST_CACHE_TTL_SEC = int(os.getenv("BACKTEST_CACHE_TTL_SEC", "600"))  # 10분
+# 프로세스 내 결과 캐시 TTL — 자동 워밍 주기와 맞춰 30분
+BACKTEST_CACHE_TTL_SEC = int(os.getenv("BACKTEST_CACHE_TTL_SEC", "1800"))  # 30분
+# 백그라운드 자동 워밍: summary + trades 를 주기적으로 호출해 캐시를 유지한다.
+# 워밍 주기는 캐시 TTL 보다 약간 짧아야 사용자 호출이 항상 캐시에 적중한다.
+BACKTEST_AUTO_WARMUP_ENABLED = os.getenv("BACKTEST_AUTO_WARMUP_ENABLED", "true").lower() in (
+    "1", "true", "yes", "on",
+)
+BACKTEST_AUTO_WARMUP_INTERVAL_SEC = int(os.getenv("BACKTEST_AUTO_WARMUP_INTERVAL_SEC", "1500"))  # 25분
+# 서버 기동 직후 부담 회피용 초기 지연
+BACKTEST_AUTO_WARMUP_INITIAL_DELAY_SEC = int(os.getenv("BACKTEST_AUTO_WARMUP_INITIAL_DELAY_SEC", "10"))
 # 진행 중(open) 포지션 라이브 뷰 — 현재가 자주 변동 → 짧은 TTL
 BACKTEST_LIVE_CACHE_TTL_SEC = int(os.getenv("BACKTEST_LIVE_CACHE_TTL_SEC", "60"))  # 1분
 # 진행 중 포지션 응답에 포함할 포지션 상한 (horizon별)

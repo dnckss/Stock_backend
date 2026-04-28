@@ -230,3 +230,58 @@ async def run_news_feed_loop():
             logger.exception("뉴스 피드 루프 에러: %s", e)
 
         await asyncio.sleep(NEWS_FEED_INTERVAL_SEC)
+
+
+async def run_backtest_warmup_loop():
+    """
+    백테스트 결과를 주기적으로 자동 산출해 캐시를 워밍한다.
+    사용자가 백테스트 페이지에 들어왔을 때 첫 호출도 캐시 hit으로 즉시 응답되게 한다.
+
+    워밍 대상:
+      - run_summary  : signals/strategist 백테스트 헤드라인
+      - run_trade_history(strategist|signals) : 진입→청산 거래 내역
+      - live 는 1분 TTL 짧아서 워밍 의미 없으므로 제외 (사용자 호출 시 fresh 산출)
+    """
+    from config import (
+        BACKTEST_AUTO_WARMUP_ENABLED,
+        BACKTEST_AUTO_WARMUP_INITIAL_DELAY_SEC,
+        BACKTEST_AUTO_WARMUP_INTERVAL_SEC,
+    )
+
+    if not BACKTEST_AUTO_WARMUP_ENABLED:
+        logger.info("백테스트 자동 워밍 비활성화 — 건너뜀")
+        return
+
+    # 서버 기동 직후 다른 초기 작업과 충돌 회피
+    await asyncio.sleep(max(0, BACKTEST_AUTO_WARMUP_INITIAL_DELAY_SEC))
+
+    from services.backtest import run_summary, run_trade_history
+
+    while True:
+        start = datetime.now()
+        try:
+            logger.info("백테스트 자동 워밍 시작")
+
+            # 1) summary — 내부적으로 signals/strategist 백테스트 모두 캐시됨
+            try:
+                await run_summary(refresh=True)
+                logger.info("  · summary 워밍 완료")
+            except Exception as e:
+                logger.warning("  · summary 워밍 실패: %s", e)
+
+            # 2) trades — 두 source 모두 별도 캐시
+            for source in ("strategist", "signals"):
+                try:
+                    await run_trade_history(source=source, refresh=True)
+                    logger.info("  · trades(%s) 워밍 완료", source)
+                except Exception as e:
+                    logger.warning("  · trades(%s) 워밍 실패: %s", source, e)
+
+            elapsed = (datetime.now() - start).total_seconds()
+            logger.info("백테스트 자동 워밍 종료 (%.1fs)", elapsed)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.exception("백테스트 자동 워밍 루프 에러: %s", e)
+
+        await asyncio.sleep(BACKTEST_AUTO_WARMUP_INTERVAL_SEC)
