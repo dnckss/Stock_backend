@@ -21,12 +21,14 @@ from config import (
     BACKTEST_DEFAULT_LOOKBACK_DAYS,
     BACKTEST_MAX_HORIZON_DAYS,
     BACKTEST_MAX_LOOKBACK_DAYS,
+    BACKTEST_TRADES_DEFAULT_HORIZON,
 )
 from services.backtest import (
     run_live_positions,
     run_signals_backtest,
     run_strategist_backtest,
     run_summary,
+    run_trade_history,
 )
 
 logger = logging.getLogger(__name__)
@@ -118,6 +120,49 @@ async def api_backtest_summary(
     except Exception as e:
         logger.exception("summary 백테스트 실패: %s", e)
         raise HTTPException(status_code=500, detail=f"summary 백테스트 실패: {e}")
+
+
+@router.get("/backtest/trades")
+async def api_backtest_trades(
+    source: str = Query(default="strategist", description="strategist | signals"),
+    horizon: int = Query(
+        default=BACKTEST_TRADES_DEFAULT_HORIZON,
+        ge=1,
+        le=BACKTEST_MAX_HORIZON_DAYS,
+        description="청산까지의 거래일 수 (단일 값)",
+    ),
+    lookback_days: int = Query(
+        default=BACKTEST_DEFAULT_LOOKBACK_DAYS,
+        ge=1,
+        le=BACKTEST_MAX_LOOKBACK_DAYS,
+    ),
+    include_open: int = Query(
+        default=1,
+        description="1이면 horizon 미달(open) 거래도 현재가 mark-to-market으로 포함",
+    ),
+    refresh: int = Query(default=0),
+):
+    """
+    진입(포트폴리오) → 청산 단위 거래 내역.
+
+    같은 분(:00초) 안에 들어온 BUY/SELL 추천/시그널을 하나의 "포트폴리오 진입(trade)"으로 묶고,
+    horizon 거래일 후의 종가로 청산했다고 가정해 종목별·전체 수익률을 반환한다.
+
+    응답:
+      summary: 전체 win_rate / avg_return / total_return / best/worst trade
+      trades[]: 진입일·청산일·portfolio_return_pct + legs[](종목별 entry/exit/return)
+    """
+    if source not in ("strategist", "signals"):
+        raise HTTPException(status_code=400, detail="source 는 strategist | signals 만 허용됩니다.")
+    try:
+        return await run_trade_history(
+            source, horizon, lookback_days,
+            include_open=bool(include_open),
+            refresh=bool(refresh),
+        )
+    except Exception as e:
+        logger.exception("trades 백테스트 실패: %s", e)
+        raise HTTPException(status_code=500, detail=f"trades 백테스트 실패: {e}")
 
 
 @router.get("/backtest/live")

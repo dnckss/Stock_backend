@@ -40,6 +40,9 @@ from config import (
     BACKTEST_MAX_LOOKBACK_DAYS,
     BACKTEST_MIN_SAMPLES,
     BACKTEST_PRICE_LOOKAHEAD_DAYS,
+    BACKTEST_TRADES_DEFAULT_HORIZON,
+    BACKTEST_TRADES_MAX_LEGS_PER_TRADE,
+    BACKTEST_TRADES_MAX_TRADES,
 )
 from services.crud import (
     get_analysis_records_for_backtest,
@@ -975,4 +978,316 @@ async def run_live_positions(
     result = await asyncio.to_thread(_run_live_sync, lb, hs)
     sanitized = sanitize_for_json(result)
     _live_cache_put(key, sanitized)
+    return sanitized
+
+
+# ---------------------------------------------------------------------------
+# Trade history (진입→청산 단위 거래 리스트)
+# ---------------------------------------------------------------------------
+# 같은 시점에 들어온 추천/시그널을 하나의 "포트폴리오 진입(trade)"으로 묶고,
+# horizon 거래일 후의 종가로 청산했다고 가정해 종목별·전체 수익률을 계산한다.
+# horizon 미달 trade는 status="open" + 현재가 mark-to-market 으로 보여준다.
+
+_TRADE_SOURCES = ("strategist", "signals")
+
+
+def _minute_key(dt: datetime) -> str:
+    """created_at 을 분 단위로 정규화 — 같은 batch insert 를 한 그룹으로."""
+    return dt.replace(second=0, microsecond=0).isoformat()
+
+
+def _build_trade_legs(
+    group_records: list[dict],
+    close_df: pd.DataFrame,
+    horizon: int,
+    *,
+    direction_key: str,
+    price_key: str,
+    leg_extra_fields: list[str],
+    max_legs: int,
+) -> list[dict[str, Any]]:
+    """그룹 내 각 종목을 포지션 leg로 변환. 평가 불가 종목은 제외."""
+    legs: list[dict[str, Any]] = []
+    for r in group_records:
+        if len(legs) >= max_legs:
+            break
+        ticker = (r.get("ticker") or "").upper().strip()
+        direction = (r.get(direction_key) or "").upper().strip()
+        entry_price = _safe_float(r.get(price_key))
+        entry_dt = _parse_iso(r.get("created_at"))
+        if not ticker or direction not in ("BUY", "SELL"):
+            continue
+        if entry_price is None or entry_price <= 0 or entry_dt is None:
+            continue
+
+        # 1) 우선 horizon 만족하는 exit 시도(=closed)
+        exit_price, exit_date = _exit_price_after(close_df, ticker, entry_dt, horizon)
+        leg_status = "closed" if exit_price is not None else "open"
+        # 2) 미만족이면 최신 종가로 mark-to-market(=open)
+        if exit_price is None:
+            exit_price, exit_date = _latest_close(close_df, ticker)
+            if exit_price is None:
+                continue
+
+        raw_return = (exit_price - entry_price) / entry_price * 100.0
+        adjusted = raw_return if direction == "BUY" else -raw_return
+
+        leg: dict[str, Any] = {
+            "ticker": ticker,
+            "direction": direction,
+            "entry_price": _round(entry_price, 4),
+            "exit_price": _round(exit_price, 4),
+            "exit_date": exit_date.isoformat() if exit_date else None,
+            "exit_status": leg_status,
+            "raw_return_pct": _round(raw_return, 2),
+            "return_pct": _round(adjusted, 2),
+        }
+        for k in leg_extra_fields:
+            v = r.get(k)
+            if v is not None:
+                leg[k] = v
+        legs.append(leg)
+    return legs
+
+
+def _build_trade_from_group(
+    group_key: str,
+    group_records: list[dict],
+    close_df: pd.DataFrame,
+    horizon: int,
+    *,
+    source_label: str,
+    direction_key: str,
+    price_key: str,
+    leg_extra_fields: list[str],
+    portfolio_extra_fields: list[str],
+    max_legs: int,
+) -> dict[str, Any] | None:
+    if not group_records:
+        return None
+
+    legs = _build_trade_legs(
+        group_records, close_df, horizon,
+        direction_key=direction_key, price_key=price_key,
+        leg_extra_fields=leg_extra_fields, max_legs=max_legs,
+    )
+    if not legs:
+        return None
+
+    weight = round(100.0 / len(legs), 2)
+    for leg in legs:
+        leg["weight_pct"] = weight
+
+    entry_dt = _parse_iso(group_records[0].get("created_at"))
+    portfolio_return = statistics.fmean(l["return_pct"] for l in legs)
+    winners = sum(1 for l in legs if l["return_pct"] > 0)
+    losers = sum(1 for l in legs if l["return_pct"] < 0)
+
+    # trade-level closed 여부: 모든 leg가 closed면 trade도 closed
+    all_closed = all(l["exit_status"] == "closed" for l in legs)
+    status = "closed" if all_closed else "open"
+
+    # exit_date: closed면 leg들의 마지막 exit_date(보통 동일), open이면 진행 중
+    closed_legs = [l for l in legs if l["exit_status"] == "closed"]
+    if closed_legs:
+        exit_date_iso = max(l["exit_date"] for l in closed_legs if l.get("exit_date"))
+    else:
+        exit_date_iso = None
+
+    elapsed_max = 0
+    for l in legs:
+        e = _elapsed_trading_days(close_df, l["ticker"], entry_dt) if entry_dt else 0
+        if e > elapsed_max:
+            elapsed_max = e
+
+    trade: dict[str, Any] = {
+        "trade_id": f"{source_label}-{group_key}",
+        "source": source_label,
+        "entry_at": entry_dt.isoformat() if entry_dt else None,
+        "entry_date": entry_dt.date().isoformat() if entry_dt else None,
+        "exit_date": exit_date_iso,
+        "status": status,
+        "horizon_trading_days": horizon,
+        "elapsed_trading_days": elapsed_max,
+        "remaining_trading_days": max(0, horizon - elapsed_max) if not all_closed else 0,
+        "portfolio_return_pct": _round(portfolio_return, 2),
+        "winners_count": winners,
+        "losers_count": losers,
+        "legs_count": len(legs),
+        "legs": legs,
+    }
+
+    # 포트폴리오 메타 — 그룹 내 첫 레코드에서 가져오기 (같은 trade라 동일하다고 가정)
+    first = group_records[0]
+    for k in portfolio_extra_fields:
+        v = first.get(k)
+        if v is not None:
+            trade[k] = v
+    return trade
+
+
+def _summarize_trades(trades: list[dict[str, Any]]) -> dict[str, Any]:
+    closed = [t for t in trades if t["status"] == "closed"]
+    open_ = [t for t in trades if t["status"] == "open"]
+
+    win_rate = None
+    avg_ret = None
+    median_ret = None
+    total_return = None
+    best = None
+    worst = None
+    if closed:
+        rets = [t["portfolio_return_pct"] for t in closed if t.get("portfolio_return_pct") is not None]
+        if rets:
+            wins = [r for r in rets if r > 0]
+            win_rate = _round(len(wins) / len(rets) * 100, 2)
+            avg_ret = _round(statistics.fmean(rets), 2)
+            median_ret = _round(statistics.median(rets), 2)
+            # 누적: 동등가중 시계열로 단순 곱
+            cum = 1.0
+            for r in rets:
+                cum *= 1.0 + r / 100.0
+            total_return = _round((cum - 1.0) * 100, 2)
+            best_idx = max(range(len(closed)), key=lambda i: closed[i].get("portfolio_return_pct") or -1e9)
+            worst_idx = min(range(len(closed)), key=lambda i: closed[i].get("portfolio_return_pct") or 1e9)
+            best = {
+                "trade_id": closed[best_idx]["trade_id"],
+                "entry_date": closed[best_idx].get("entry_date"),
+                "exit_date": closed[best_idx].get("exit_date"),
+                "portfolio_return_pct": closed[best_idx].get("portfolio_return_pct"),
+            }
+            worst = {
+                "trade_id": closed[worst_idx]["trade_id"],
+                "entry_date": closed[worst_idx].get("entry_date"),
+                "exit_date": closed[worst_idx].get("exit_date"),
+                "portfolio_return_pct": closed[worst_idx].get("portfolio_return_pct"),
+            }
+
+    open_returns = [t["portfolio_return_pct"] for t in open_ if t.get("portfolio_return_pct") is not None]
+    open_avg = _round(statistics.fmean(open_returns), 2) if open_returns else None
+
+    return {
+        "total_trades": len(trades),
+        "closed_trades": len(closed),
+        "open_trades": len(open_),
+        "win_rate_pct": win_rate,
+        "avg_return_pct": avg_ret,
+        "median_return_pct": median_ret,
+        "total_return_pct": total_return,
+        "open_avg_unrealized_pct": open_avg,
+        "best_trade": best,
+        "worst_trade": worst,
+    }
+
+
+def _run_trade_history_sync(
+    source: str,
+    horizon: int,
+    lookback_days: int,
+    *,
+    include_open: bool,
+) -> dict[str, Any]:
+    started = time.time()
+
+    if source == "strategist":
+        raw_records = get_strategy_records_for_backtest(lookback_days)
+        records = [_enrich_strategy_entry(dict(r)) for r in raw_records]
+        direction_key = "direction"
+        price_key = "price"
+        leg_extra = ["confidence", "rationale", "stop_loss", "stop_loss_pct",
+                     "target1_price", "target2_price", "risk_reward_ratio",
+                     "strategy_type"]
+        portfolio_extra = ["market_regime"]
+    else:  # signals
+        records = get_analysis_records_for_backtest(lookback_days)
+        direction_key = "signal"
+        price_key = "price"
+        leg_extra = ["signal_source", "divergence", "sentiment"]
+        portfolio_extra: list[str] = []
+
+    if not records:
+        return {
+            "source": source,
+            "horizon_days": horizon,
+            "lookback_days": lookback_days,
+            "include_open": include_open,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "elapsed_sec": round(time.time() - started, 2),
+            "summary": _summarize_trades([]),
+            "trades": [],
+            "message": "평가할 레코드가 없습니다.",
+        }
+
+    close_df = _download_prices_for(records)
+
+    # 분 단위로 그룹핑 (같은 batch insert 묶음 = 한 trade)
+    groups: dict[str, list[dict]] = {}
+    for r in records:
+        dt = _parse_iso(r.get("created_at"))
+        if dt is None:
+            continue
+        key = _minute_key(dt)
+        groups.setdefault(key, []).append(r)
+
+    trades: list[dict[str, Any]] = []
+    for key, group_records in groups.items():
+        trade = _build_trade_from_group(
+            key, group_records, close_df, horizon,
+            source_label=source,
+            direction_key=direction_key, price_key=price_key,
+            leg_extra_fields=leg_extra,
+            portfolio_extra_fields=portfolio_extra,
+            max_legs=BACKTEST_TRADES_MAX_LEGS_PER_TRADE,
+        )
+        if trade is None:
+            continue
+        if not include_open and trade["status"] == "open":
+            continue
+        trades.append(trade)
+
+    # 최신 진입 순 정렬 후 상한 적용
+    trades.sort(key=lambda t: t.get("entry_at") or "", reverse=True)
+    trades = trades[:BACKTEST_TRADES_MAX_TRADES]
+
+    return {
+        "source": source,
+        "horizon_days": horizon,
+        "lookback_days": lookback_days,
+        "include_open": include_open,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "elapsed_sec": round(time.time() - started, 2),
+        "summary": _summarize_trades(trades),
+        "trades": trades,
+    }
+
+
+async def run_trade_history(
+    source: str,
+    horizon: int | None = None,
+    lookback_days: int | None = None,
+    *,
+    include_open: bool = True,
+    refresh: bool = False,
+) -> dict[str, Any]:
+    """
+    진입(포트폴리오) → 청산 단위로 거래 내역을 반환한다.
+    같은 분 안에 들어온 BUY/SELL 추천/시그널을 한 trade(포트폴리오)로 묶는다.
+    """
+    src = source if source in _TRADE_SOURCES else "strategist"
+    h = horizon if horizon and 0 < horizon <= BACKTEST_MAX_HORIZON_DAYS else BACKTEST_TRADES_DEFAULT_HORIZON
+    lb = _sanitize_lookback(lookback_days or BACKTEST_DEFAULT_LOOKBACK_DAYS)
+
+    cache_key = hashlib.sha1(
+        f"trades|{src}|{h}|{lb}|{int(include_open)}".encode("utf-8")
+    ).hexdigest()
+    if not refresh:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+    result = await asyncio.to_thread(
+        _run_trade_history_sync, src, h, lb, include_open=include_open,
+    )
+    sanitized = sanitize_for_json(result)
+    _cache_put(cache_key, sanitized)
     return sanitized
