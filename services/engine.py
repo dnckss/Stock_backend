@@ -246,6 +246,7 @@ async def run_backtest_warmup_loop():
         BACKTEST_AUTO_WARMUP_ENABLED,
         BACKTEST_AUTO_WARMUP_INITIAL_DELAY_SEC,
         BACKTEST_AUTO_WARMUP_INTERVAL_SEC,
+        BACKTEST_WARMUP_STEP_DELAY_SEC,
     )
 
     if not BACKTEST_AUTO_WARMUP_ENABLED:
@@ -256,6 +257,8 @@ async def run_backtest_warmup_loop():
     await asyncio.sleep(max(0, BACKTEST_AUTO_WARMUP_INITIAL_DELAY_SEC))
 
     from services.backtest import run_summary, run_trade_history
+
+    step_delay = max(0, BACKTEST_WARMUP_STEP_DELAY_SEC)
 
     while True:
         start = datetime.now()
@@ -269,8 +272,10 @@ async def run_backtest_warmup_loop():
             except Exception as e:
                 logger.warning("  · summary 워밍 실패: %s", e)
 
-            # 2) trades — 두 source 모두 별도 캐시
+            # 2) trades — 두 source 모두 별도 캐시. 단계 사이 sleep 으로 yfinance 부담 분산.
             for source in ("strategist", "signals"):
+                if step_delay:
+                    await asyncio.sleep(step_delay)
                 try:
                     await run_trade_history(source=source, refresh=True)
                     logger.info("  · trades(%s) 워밍 완료", source)

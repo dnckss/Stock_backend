@@ -256,6 +256,13 @@ BACKTEST_AUTO_WARMUP_ENABLED = os.getenv("BACKTEST_AUTO_WARMUP_ENABLED", "true")
 BACKTEST_AUTO_WARMUP_INTERVAL_SEC = int(os.getenv("BACKTEST_AUTO_WARMUP_INTERVAL_SEC", "1500"))  # 25분
 # 서버 기동 직후 부담 회피용 초기 지연
 BACKTEST_AUTO_WARMUP_INITIAL_DELAY_SEC = int(os.getenv("BACKTEST_AUTO_WARMUP_INITIAL_DELAY_SEC", "10"))
+# 워밍 단계(summary → trades(strategist) → trades(signals)) 사이 분산 지연
+BACKTEST_WARMUP_STEP_DELAY_SEC = int(os.getenv("BACKTEST_WARMUP_STEP_DELAY_SEC", "10"))
+
+# yfinance batch 가격 다운로드 결과 메모리 캐시 TTL.
+# (tickers_set, start, end) 가 같으면 같은 캐시 엔트리 → signals/strategist/trades 가
+# 한 사이클 안에서 가격 다운로드를 중복 수행하지 않게 한다 → Yahoo 429 회피.
+BACKTEST_PRICE_CACHE_TTL_SEC = int(os.getenv("BACKTEST_PRICE_CACHE_TTL_SEC", "1800"))  # 30분
 # 진행 중(open) 포지션 라이브 뷰 — 현재가 자주 변동 → 짧은 TTL
 BACKTEST_LIVE_CACHE_TTL_SEC = int(os.getenv("BACKTEST_LIVE_CACHE_TTL_SEC", "60"))  # 1분
 # 진행 중 포지션 응답에 포함할 포지션 상한 (horizon별)

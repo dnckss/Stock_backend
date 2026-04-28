@@ -20,6 +20,7 @@ import hashlib
 import logging
 import math
 import statistics
+import threading
 import time
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
@@ -39,11 +40,13 @@ from config import (
     BACKTEST_MAX_HORIZON_DAYS,
     BACKTEST_MAX_LOOKBACK_DAYS,
     BACKTEST_MIN_SAMPLES,
+    BACKTEST_PRICE_CACHE_TTL_SEC,
     BACKTEST_PRICE_LOOKAHEAD_DAYS,
     BACKTEST_TRADES_DEFAULT_HORIZON,
     BACKTEST_TRADES_MAX_LEGS_PER_TRADE,
     BACKTEST_TRADES_MAX_TRADES,
 )
+from services.yf_limiter import throttled
 from services.crud import (
     get_analysis_records_for_backtest,
     get_strategy_records_for_backtest,
@@ -107,6 +110,37 @@ def _normalize_horizons(horizons: Iterable[int] | None) -> list[int]:
 # 가격 조회 (yfinance 일괄 다운로드)
 # ---------------------------------------------------------------------------
 
+# 가격 다운로드 캐시 — 같은 (ticker_set, start, end) 키로 30분 재사용.
+# signals/strategist/trades 가 한 사이클에서 같은 가격 데이터를 중복 다운로드 하지 않게.
+_price_cache: dict[tuple, tuple[float, pd.DataFrame]] = {}
+_price_cache_lock = threading.Lock()
+
+
+def _price_cache_key(tickers: list[str], start: date, end: date) -> tuple:
+    return (
+        tuple(sorted({(t or "").upper() for t in tickers if t})),
+        start.isoformat(),
+        end.isoformat(),
+    )
+
+
+def _price_cache_get(key: tuple) -> pd.DataFrame | None:
+    with _price_cache_lock:
+        entry = _price_cache.get(key)
+        if not entry:
+            return None
+        ts, df = entry
+        if time.time() - ts > BACKTEST_PRICE_CACHE_TTL_SEC:
+            _price_cache.pop(key, None)
+            return None
+        return df
+
+
+def _price_cache_put(key: tuple, df: pd.DataFrame) -> None:
+    with _price_cache_lock:
+        _price_cache[key] = (time.time(), df)
+
+
 def _fetch_close_prices(
     tickers: list[str],
     start: date,
@@ -116,13 +150,24 @@ def _fetch_close_prices(
     티커 목록의 종가 시계열을 한 번에 다운로드한다.
     반환: 컬럼=ticker, index=DatetimeIndex(거래일)인 DataFrame.
     실패/빈 결과면 빈 DataFrame.
+
+    같은 (ticker_set, start, end) 호출은 BACKTEST_PRICE_CACHE_TTL_SEC 동안 메모리 재사용.
+    실제 yf.download 호출은 yf_limiter throttled 로 글로벌 동시성·간격 제어.
     """
     if not tickers:
         return pd.DataFrame()
+
+    cache_key = _price_cache_key(tickers, start, end)
+    cached = _price_cache_get(cache_key)
+    if cached is not None:
+        logger.debug("backtest 가격 캐시 hit (%d tickers, start=%s)", len(tickers), start)
+        return cached
+
     # yfinance 는 end 가 exclusive
     end_plus = end + timedelta(days=1)
     try:
-        df = yf.download(
+        df = throttled(
+            yf.download,
             tickers,
             start=start.isoformat(),
             end=end_plus.isoformat(),
@@ -134,7 +179,7 @@ def _fetch_close_prices(
         logger.warning("백테스트 가격 다운로드 실패: %s", e)
         return pd.DataFrame()
 
-    if df.empty:
+    if df is None or df.empty:
         return pd.DataFrame()
 
     # MultiIndex: 여러 티커 → df["Close"] 로 종가만 추출
@@ -154,7 +199,9 @@ def _fetch_close_prices(
         if t not in close.columns:
             close[t] = float("nan")
 
-    return close.sort_index()
+    close = close.sort_index()
+    _price_cache_put(cache_key, close)
+    return close
 
 
 def _exit_price_after(
