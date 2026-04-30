@@ -21,7 +21,9 @@ from config import (
     BACKTEST_DEFAULT_LOOKBACK_DAYS,
     BACKTEST_MAX_HORIZON_DAYS,
     BACKTEST_MAX_LOOKBACK_DAYS,
+    BACKTEST_TRADES_DEFAULT_GROUP_BY,
     BACKTEST_TRADES_DEFAULT_HORIZON,
+    BACKTEST_TRADES_VALID_GROUP_BYS,
 )
 from services.backtest import (
     run_live_positions,
@@ -140,13 +142,18 @@ async def api_backtest_trades(
         default=1,
         description="1이면 horizon 미달(open) 거래도 현재가 mark-to-market으로 포함",
     ),
+    group_by: str = Query(
+        default=BACKTEST_TRADES_DEFAULT_GROUP_BY,
+        description="trade 그룹 윈도우: day | hour | minute (기본 day — 그날 들어온 BUY/SELL 한 trade)",
+    ),
     refresh: int = Query(default=0),
 ):
     """
     진입(포트폴리오) → 청산 단위 거래 내역.
 
-    같은 분(:00초) 안에 들어온 BUY/SELL 추천/시그널을 하나의 "포트폴리오 진입(trade)"으로 묶고,
-    horizon 거래일 후의 종가로 청산했다고 가정해 종목별·전체 수익률을 반환한다.
+    group_by 윈도우 안에 들어온 BUY/SELL 추천/시그널을 하나의 "포트폴리오 진입(trade)"으로
+    묶고(같은 ticker+direction 중복은 첫 등장만), horizon 거래일 후의 종가로 청산했다고
+    가정해 종목별·전체 수익률을 반환한다.
 
     응답:
       summary: 전체 win_rate / avg_return / total_return / best/worst trade
@@ -154,10 +161,16 @@ async def api_backtest_trades(
     """
     if source not in ("strategist", "signals"):
         raise HTTPException(status_code=400, detail="source 는 strategist | signals 만 허용됩니다.")
+    if group_by not in BACKTEST_TRADES_VALID_GROUP_BYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"group_by 는 {sorted(BACKTEST_TRADES_VALID_GROUP_BYS)} 중 하나여야 합니다.",
+        )
     try:
         return await run_trade_history(
             source, horizon, lookback_days,
             include_open=bool(include_open),
+            group_by=group_by,
             refresh=bool(refresh),
         )
     except Exception as e:

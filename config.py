@@ -271,7 +271,14 @@ BACKTEST_LIVE_POSITIONS_PER_HORIZON = int(os.getenv("BACKTEST_LIVE_POSITIONS_PER
 # Trade history (진입→청산 단위 거래 리스트)
 BACKTEST_TRADES_DEFAULT_HORIZON = int(os.getenv("BACKTEST_TRADES_DEFAULT_HORIZON", "5"))
 BACKTEST_TRADES_MAX_TRADES = int(os.getenv("BACKTEST_TRADES_MAX_TRADES", "200"))
-BACKTEST_TRADES_MAX_LEGS_PER_TRADE = int(os.getenv("BACKTEST_TRADES_MAX_LEGS_PER_TRADE", "20"))
+# 일 단위 그룹핑 시 leg가 많아질 수 있어 cap 을 50 으로 확대
+BACKTEST_TRADES_MAX_LEGS_PER_TRADE = int(os.getenv("BACKTEST_TRADES_MAX_LEGS_PER_TRADE", "50"))
+# trade 그룹 윈도우: day | hour | minute
+# - day: "그날 들어온 모든 BUY/SELL 시그널 = 한 trade" (사용자 멘탈 모델에 가장 가까움)
+# - hour: 시간 단위
+# - minute: batch insert 동일 분 (이전 동작)
+BACKTEST_TRADES_DEFAULT_GROUP_BY = os.getenv("BACKTEST_TRADES_DEFAULT_GROUP_BY", "day")
+BACKTEST_TRADES_VALID_GROUP_BYS = frozenset({"day", "hour", "minute"})
 # 버킷 통계 산출 시 최소 표본 수 (미달 시 버킷 결과 생략)
 BACKTEST_MIN_SAMPLES = int(os.getenv("BACKTEST_MIN_SAMPLES", "5"))
 # 연환산 계수 (Sharpe 계산) — US 거래일 기준

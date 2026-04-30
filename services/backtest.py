@@ -42,9 +42,11 @@ from config import (
     BACKTEST_MIN_SAMPLES,
     BACKTEST_PRICE_CACHE_TTL_SEC,
     BACKTEST_PRICE_LOOKAHEAD_DAYS,
+    BACKTEST_TRADES_DEFAULT_GROUP_BY,
     BACKTEST_TRADES_DEFAULT_HORIZON,
     BACKTEST_TRADES_MAX_LEGS_PER_TRADE,
     BACKTEST_TRADES_MAX_TRADES,
+    BACKTEST_TRADES_VALID_GROUP_BYS,
 )
 from services.yf_limiter import throttled
 from services.crud import (
@@ -1038,8 +1040,17 @@ async def run_live_positions(
 _TRADE_SOURCES = ("strategist", "signals")
 
 
-def _minute_key(dt: datetime) -> str:
-    """created_at 을 분 단위로 정규화 — 같은 batch insert 를 한 그룹으로."""
+def _bucket_key(dt: datetime, group_by: str) -> str:
+    """
+    created_at 을 group_by 윈도우로 정규화한 키.
+    - day:    "2026-04-15"
+    - hour:   "2026-04-15T04:00:00+00:00"
+    - minute: "2026-04-15T04:37:00+00:00"
+    """
+    if group_by == "day":
+        return dt.date().isoformat()
+    if group_by == "hour":
+        return dt.replace(minute=0, second=0, microsecond=0).isoformat()
     return dt.replace(second=0, microsecond=0).isoformat()
 
 
@@ -1053,8 +1064,13 @@ def _build_trade_legs(
     leg_extra_fields: list[str],
     max_legs: int,
 ) -> list[dict[str, Any]]:
-    """그룹 내 각 종목을 포지션 leg로 변환. 평가 불가 종목은 제외."""
+    """
+    그룹 내 각 종목을 포지션 leg로 변환. 평가 불가 종목은 제외.
+    같은 (ticker, direction)이 여러 번 등장(여러 사이클의 같은 시그널)하면
+    가장 이른 entry 만 한 leg 로 유지(중복 제거).
+    """
     legs: list[dict[str, Any]] = []
+    seen_ticker_dir: set[tuple[str, str]] = set()
     for r in group_records:
         if len(legs) >= max_legs:
             break
@@ -1066,6 +1082,11 @@ def _build_trade_legs(
             continue
         if entry_price is None or entry_price <= 0 or entry_dt is None:
             continue
+        # 같은 그룹 내 (ticker, direction) 중복은 첫 등장만 유지
+        key = (ticker, direction)
+        if key in seen_ticker_dir:
+            continue
+        seen_ticker_dir.add(key)
 
         # 1) 우선 horizon 만족하는 exit 시도(=closed)
         exit_price, exit_date = _exit_price_after(close_df, ticker, entry_dt, horizon)
@@ -1233,6 +1254,7 @@ def _run_trade_history_sync(
     lookback_days: int,
     *,
     include_open: bool,
+    group_by: str,
 ) -> dict[str, Any]:
     started = time.time()
 
@@ -1258,6 +1280,7 @@ def _run_trade_history_sync(
             "horizon_days": horizon,
             "lookback_days": lookback_days,
             "include_open": include_open,
+            "group_by": group_by,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "elapsed_sec": round(time.time() - started, 2),
             "summary": _summarize_trades([]),
@@ -1267,13 +1290,15 @@ def _run_trade_history_sync(
 
     close_df = _download_prices_for(records)
 
-    # 분 단위로 그룹핑 (같은 batch insert 묶음 = 한 trade)
+    # group_by 윈도우 단위로 그룹핑.
+    # day → 그날 들어온 모든 BUY/SELL 시그널이 한 trade(포트폴리오)
+    # hour → 시간 단위 / minute → 분 단위(이전 동작)
     groups: dict[str, list[dict]] = {}
     for r in records:
         dt = _parse_iso(r.get("created_at"))
         if dt is None:
             continue
-        key = _minute_key(dt)
+        key = _bucket_key(dt, group_by)
         groups.setdefault(key, []).append(r)
 
     trades: list[dict[str, Any]] = []
@@ -1301,6 +1326,7 @@ def _run_trade_history_sync(
         "horizon_days": horizon,
         "lookback_days": lookback_days,
         "include_open": include_open,
+        "group_by": group_by,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "elapsed_sec": round(time.time() - started, 2),
         "summary": _summarize_trades(trades),
@@ -1314,18 +1340,22 @@ async def run_trade_history(
     lookback_days: int | None = None,
     *,
     include_open: bool = True,
+    group_by: str | None = None,
     refresh: bool = False,
 ) -> dict[str, Any]:
     """
-    진입(포트폴리오) → 청산 단위로 거래 내역을 반환한다.
-    같은 분 안에 들어온 BUY/SELL 추천/시그널을 한 trade(포트폴리오)로 묶는다.
+    진입(포트폴리오) → 청산 단위 거래 내역을 반환한다.
+    group_by: day | hour | minute. 기본은 BACKTEST_TRADES_DEFAULT_GROUP_BY(='day').
+    같은 그룹 안의 BUY/SELL 추천/시그널을 한 trade(포트폴리오)로 묶고,
+    같은 (ticker, direction) 중복은 첫 등장만 leg로 유지한다.
     """
     src = source if source in _TRADE_SOURCES else "strategist"
     h = horizon if horizon and 0 < horizon <= BACKTEST_MAX_HORIZON_DAYS else BACKTEST_TRADES_DEFAULT_HORIZON
     lb = _sanitize_lookback(lookback_days or BACKTEST_DEFAULT_LOOKBACK_DAYS)
+    gb = group_by if group_by in BACKTEST_TRADES_VALID_GROUP_BYS else BACKTEST_TRADES_DEFAULT_GROUP_BY
 
     cache_key = hashlib.sha1(
-        f"trades|{src}|{h}|{lb}|{int(include_open)}".encode("utf-8")
+        f"trades|{src}|{h}|{lb}|{int(include_open)}|{gb}".encode("utf-8")
     ).hexdigest()
     if not refresh:
         cached = _cache_get(cache_key)
@@ -1333,7 +1363,7 @@ async def run_trade_history(
             return cached
 
     result = await asyncio.to_thread(
-        _run_trade_history_sync, src, h, lb, include_open=include_open,
+        _run_trade_history_sync, src, h, lb, include_open=include_open, group_by=gb,
     )
     sanitized = sanitize_for_json(result)
     _cache_put(cache_key, sanitized)
