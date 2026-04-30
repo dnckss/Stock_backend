@@ -105,6 +105,15 @@ EARNINGS_BUY_PCT = 0.05
 EARNINGS_SELL_PCT = -0.05
 # Yahoo quoteSummary 연속 호출 완화(초). 0이면 대기 없음.
 EARNINGS_INTER_REQUEST_DELAY_SEC = float(os.getenv("EARNINGS_INTER_REQUEST_DELAY_SEC", "0"))
+# 실적 서프라이즈 결과 메모리 캐시 TTL — 분기 실적은 자주 바뀌지 않으므로 24시간.
+# 같은 ticker 재조회 시 yfinance 호출 없이 즉시 반환 → 429 회피의 핵심.
+EARNINGS_CACHE_TTL_SEC = int(os.getenv("EARNINGS_CACHE_TTL_SEC", "86400"))  # 24h
+# 실패(None)도 캐시할지 — True면 일시 429에 걸린 ticker 도 24h 캐시되어 사이클 부담 ↓
+EARNINGS_CACHE_FAILURES = os.getenv("EARNINGS_CACHE_FAILURES", "true").lower() in (
+    "1", "true", "yes", "on",
+)
+# 실패 캐시는 짧게(1시간) — 그날 안에 재시도는 가능하게
+EARNINGS_FAILURE_CACHE_TTL_SEC = int(os.getenv("EARNINGS_FAILURE_CACHE_TTL_SEC", "3600"))  # 1h
 
 # FinBERT Sentiment
 SENTIMENT_MAX_HEADLINES = 10
