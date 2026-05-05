@@ -18,7 +18,9 @@ from services.finbert import analyze_text, analyze_batch
 
 logger = logging.getLogger(__name__)
 
-_FINVIZ_BASE = "https://finviz.com/quote.ashx?t={}"
+# Finviz 가 2026년 quote.ashx → quote 로 영구 리다이렉트(301).
+# 새 URL 을 직접 사용해 redirect 비용을 피하고, 만약을 위해 client 에서도 follow_redirects=True 로 안전망.
+_FINVIZ_BASE = "https://finviz.com/quote?t={}"
 _FINVIZ_HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
 
 # Finviz 동시 연결 수를 httpx 레벨에서도 제한
@@ -126,6 +128,6 @@ async def analyze_sentiments(tickers: list[str]) -> list[float]:
 
     sem = asyncio.Semaphore(SENTIMENT_FINVIZ_MAX_CONCURRENT)
 
-    async with httpx.AsyncClient(limits=_HTTP_LIMITS) as client:
+    async with httpx.AsyncClient(limits=_HTTP_LIMITS, follow_redirects=True) as client:
         tasks = [_analyze_one(client, sem, t) for t in tickers]
         return list(await asyncio.gather(*tasks))
