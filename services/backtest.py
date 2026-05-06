@@ -763,13 +763,19 @@ def _pick_headline(result: dict[str, Any], horizon: int) -> dict[str, Any]:
     }
 
 
+def _extract_best_worst(trade_result: dict[str, Any]) -> tuple[Any, Any]:
+    """trade_history 응답에서 summary.best_trade/worst_trade 만 추출."""
+    summary = trade_result.get("summary") or {}
+    return summary.get("best_trade"), summary.get("worst_trade")
+
+
 async def run_summary(
     lookback_days: int | None = None,
     horizons: Iterable[int] | None = None,
     *,
     refresh: bool = False,
 ) -> dict[str, Any]:
-    """대시보드 + AI 전략실 백테스트를 한 번에 실행하고 headline 요약."""
+    """대시보드 + AI 전략실 백테스트를 한 번에 실행하고 headline 요약 + best/worst trade."""
     lb = _sanitize_lookback(lookback_days)
     hs = _normalize_horizons(horizons)
 
@@ -778,6 +784,22 @@ async def run_summary(
     # 각각 결과는 10분 캐시되므로 두 번째 호출부터는 즉시 반환된다.
     signals = await run_signals_backtest(lb, hs, refresh=refresh)
     strat = await run_strategist_backtest(lb, hs, refresh=refresh)
+
+    # best/worst trade — 워밍 루프 캐시(default horizon, default include_open) 와 동일 파라미터로
+    # 호출해 캐시 hit 으로 즉시 반환되도록 한다.
+    trade_horizon = (
+        BACKTEST_TRADES_DEFAULT_HORIZON
+        if BACKTEST_TRADES_DEFAULT_HORIZON in hs
+        else (hs[0] if hs else BACKTEST_TRADES_DEFAULT_HORIZON)
+    )
+    signals_trades = await run_trade_history(
+        "signals", horizon=trade_horizon, lookback_days=lb, refresh=refresh,
+    )
+    strat_trades = await run_trade_history(
+        "strategist", horizon=trade_horizon, lookback_days=lb, refresh=refresh,
+    )
+    s_best, s_worst = _extract_best_worst(signals_trades)
+    st_best, st_worst = _extract_best_worst(strat_trades)
 
     return sanitize_for_json({
         "lookback_days": lb,
@@ -788,12 +810,18 @@ async def run_summary(
             "total_evaluations": signals.get("total_evaluations", 0),
             "tickers_count": signals.get("tickers_count", 0),
             "headlines": [_pick_headline(signals, h) for h in hs],
+            "trade_horizon": trade_horizon,
+            "best_trade": s_best,
+            "worst_trade": s_worst,
         },
         "strategist": {
             "total_records": strat.get("total_records", 0),
             "total_evaluations": strat.get("total_evaluations", 0),
             "tickers_count": strat.get("tickers_count", 0),
             "headlines": [_pick_headline(strat, h) for h in hs],
+            "trade_horizon": trade_horizon,
+            "best_trade": st_best,
+            "worst_trade": st_worst,
         },
     })
 
