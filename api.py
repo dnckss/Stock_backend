@@ -23,6 +23,7 @@ from services.engine import (
     run_econ_calendar_loop,
     run_macro_loop,
     run_news_feed_loop,
+    run_price_backfill_loop,
     run_price_tick_loop,
 )
 from services.websocket import manager, latest_cache
@@ -80,6 +81,7 @@ async def lifespan(app: FastAPI):
     econ_task = asyncio.create_task(run_econ_calendar_loop())
     news_task = asyncio.create_task(run_news_feed_loop())
     backtest_warmup_task = asyncio.create_task(run_backtest_warmup_loop())
+    price_backfill_task = asyncio.create_task(run_price_backfill_loop())
     yield
     scan_task.cancel()
     macro_task.cancel()
@@ -87,6 +89,7 @@ async def lifespan(app: FastAPI):
     econ_task.cancel()
     news_task.cancel()
     backtest_warmup_task.cancel()
+    price_backfill_task.cancel()
 
 
 

@@ -191,3 +191,25 @@ CREATE INDEX IF NOT EXISTS idx_chat_files_created ON chat_files (created_at DESC
 
 ALTER TABLE chat_files ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Allow all for anon" ON chat_files FOR ALL USING (true) WITH CHECK (true);
+
+-- ---------------------------------------------------------------------------
+-- 9. price_history 테이블 (OHLCV 일봉 영구 저장)
+-- 백테스트·기술지표·차트가 yfinance 를 매번 호출하지 않도록 DB 에 누적.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS price_history (
+    ticker TEXT NOT NULL,
+    date DATE NOT NULL,
+    open DOUBLE PRECISION,
+    high DOUBLE PRECISION,
+    low DOUBLE PRECISION,
+    close DOUBLE PRECISION,
+    volume BIGINT,
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (ticker, date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_price_history_date ON price_history (date);
+CREATE INDEX IF NOT EXISTS idx_price_history_ticker ON price_history (ticker);
+
+ALTER TABLE price_history ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow all for anon" ON price_history FOR ALL USING (true) WITH CHECK (true);

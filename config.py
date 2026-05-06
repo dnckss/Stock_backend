@@ -272,6 +272,22 @@ BACKTEST_WARMUP_STEP_DELAY_SEC = int(os.getenv("BACKTEST_WARMUP_STEP_DELAY_SEC",
 # (tickers_set, start, end) 가 같으면 같은 캐시 엔트리 → signals/strategist/trades 가
 # 한 사이클 안에서 가격 다운로드를 중복 수행하지 않게 한다 → Yahoo 429 회피.
 BACKTEST_PRICE_CACHE_TTL_SEC = int(os.getenv("BACKTEST_PRICE_CACHE_TTL_SEC", "1800"))  # 30분
+
+# ---------------------------------------------------------------------------
+# Price History (영구 저장) — 백테스트·기술지표 yfinance 호출을 DB 캐시로 대체
+# ---------------------------------------------------------------------------
+# 가격 backfill 백그라운드 루프 활성/주기/지연
+PRICE_BACKFILL_ENABLED = os.getenv("PRICE_BACKFILL_ENABLED", "true").lower() in (
+    "1", "true", "yes", "on",
+)
+PRICE_BACKFILL_INTERVAL_SEC = int(os.getenv("PRICE_BACKFILL_INTERVAL_SEC", "21600"))  # 6시간
+PRICE_BACKFILL_INITIAL_DELAY_SEC = int(os.getenv("PRICE_BACKFILL_INITIAL_DELAY_SEC", "60"))
+# backfill 시 매번 받을 최근 거래일 수 (5일이면 새 거래일 + 누락분 보정)
+PRICE_BACKFILL_LOOKBACK_DAYS = int(os.getenv("PRICE_BACKFILL_LOOKBACK_DAYS", "7"))
+# DB 에 저장된 ticker 의 마지막 거래일이 이 일수 이상 오래된 경우 yfinance 재호출 (stale)
+PRICE_DB_STALE_DAYS = int(os.getenv("PRICE_DB_STALE_DAYS", "5"))
+# price_history 페이지네이션 안전 상한 (200페이지 × 1000 = 20만 row)
+PRICE_HISTORY_MAX_PAGES = int(os.getenv("PRICE_HISTORY_MAX_PAGES", "200"))
 # 진행 중(open) 포지션 라이브 뷰 — 현재가 자주 변동 → 짧은 TTL
 BACKTEST_LIVE_CACHE_TTL_SEC = int(os.getenv("BACKTEST_LIVE_CACHE_TTL_SEC", "60"))  # 1분
 # 진행 중 포지션 응답에 포함할 포지션 상한 (horizon별)

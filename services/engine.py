@@ -232,6 +232,41 @@ async def run_news_feed_loop():
         await asyncio.sleep(NEWS_FEED_INTERVAL_SEC)
 
 
+async def run_price_backfill_loop():
+    """
+    매일 1회(기본 6시간 주기) active ticker 의 최근 OHLCV 를 yfinance 로 받아
+    price_history 테이블에 upsert. 평상시 백테스트·기술지표는 DB 조회만으로 끝나
+    yfinance 부담을 거의 0 으로 줄인다.
+    """
+    from config import (
+        PRICE_BACKFILL_ENABLED,
+        PRICE_BACKFILL_INITIAL_DELAY_SEC,
+        PRICE_BACKFILL_INTERVAL_SEC,
+    )
+
+    if not PRICE_BACKFILL_ENABLED:
+        logger.info("가격 backfill 비활성화 — 건너뜀")
+        return
+
+    await asyncio.sleep(max(0, PRICE_BACKFILL_INITIAL_DELAY_SEC))
+
+    from services.price_store import backfill_recent
+
+    while True:
+        try:
+            result = await asyncio.to_thread(backfill_recent)
+            logger.info(
+                "가격 backfill 완료: tickers=%s rows=%s elapsed=%.1fs",
+                result.get("tickers"), result.get("rows_written"), result.get("elapsed_sec", 0),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.exception("가격 backfill 루프 에러: %s", e)
+
+        await asyncio.sleep(PRICE_BACKFILL_INTERVAL_SEC)
+
+
 async def run_backtest_warmup_loop():
     """
     백테스트 결과를 주기적으로 자동 산출해 캐시를 워밍한다.

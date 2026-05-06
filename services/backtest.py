@@ -149,12 +149,12 @@ def _fetch_close_prices(
     end: date,
 ) -> pd.DataFrame:
     """
-    티커 목록의 종가 시계열을 한 번에 다운로드한다.
-    반환: 컬럼=ticker, index=DatetimeIndex(거래일)인 DataFrame.
-    실패/빈 결과면 빈 DataFrame.
+    종가 시계열 조회 — 3단 계층:
+      1) 프로세스 메모리 캐시 (BACKTEST_PRICE_CACHE_TTL_SEC, 30분)
+      2) Supabase price_history 테이블 (영구 저장)
+      3) yfinance fallback + DB upsert
 
-    같은 (ticker_set, start, end) 호출은 BACKTEST_PRICE_CACHE_TTL_SEC 동안 메모리 재사용.
-    실제 yf.download 호출은 yf_limiter throttled 로 글로벌 동시성·간격 제어.
+    반환: 컬럼=ticker, index=DatetimeIndex(거래일) DataFrame. 빈 결과면 빈 DataFrame.
     """
     if not tickers:
         return pd.DataFrame()
@@ -162,42 +162,23 @@ def _fetch_close_prices(
     cache_key = _price_cache_key(tickers, start, end)
     cached = _price_cache_get(cache_key)
     if cached is not None:
-        logger.debug("backtest 가격 캐시 hit (%d tickers, start=%s)", len(tickers), start)
+        logger.debug("backtest 가격 메모리 캐시 hit (%d tickers, start=%s)", len(tickers), start)
         return cached
 
-    # yfinance 는 end 가 exclusive
-    end_plus = end + timedelta(days=1)
+    # DB 우선 + yfinance fallback (price_store가 내부에서 upsert까지)
+    from services.price_store import fetch_close_prices as _fetch_from_store
     try:
-        df = throttled(
-            yf.download,
-            tickers,
-            start=start.isoformat(),
-            end=end_plus.isoformat(),
-            progress=False,
-            auto_adjust=False,
-            threads=True,
-        )
+        close = _fetch_from_store(tickers, start, end)
     except Exception as e:
-        logger.warning("백테스트 가격 다운로드 실패: %s", e)
+        logger.warning("price_store 호출 실패: %s", e)
+        close = pd.DataFrame()
+
+    if close is None or close.empty:
         return pd.DataFrame()
 
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    # MultiIndex: 여러 티커 → df["Close"] 로 종가만 추출
-    if isinstance(df.columns, pd.MultiIndex):
-        if "Close" in df.columns.get_level_values(0):
-            close = df["Close"].copy()
-        else:
-            return pd.DataFrame()
-    else:
-        # 단일 티커 → 컬럼 평면, Close 만 추출해 ticker 명으로 리네임
-        if "Close" not in df.columns:
-            return pd.DataFrame()
-        close = df[["Close"]].rename(columns={"Close": tickers[0]})
-
-    # 누락 티커 추가(KeyError 방지용 — None 채움)
-    for t in tickers:
+    # 누락 티커 컬럼 채움 (downstream KeyError 방지)
+    upper_tickers = [(t or "").upper() for t in tickers]
+    for t in upper_tickers:
         if t not in close.columns:
             close[t] = float("nan")
 
