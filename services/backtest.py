@@ -41,6 +41,7 @@ from config import (
     BACKTEST_MIN_SAMPLES,
     BACKTEST_PRICE_CACHE_TTL_SEC,
     BACKTEST_PRICE_LOOKAHEAD_DAYS,
+    BACKTEST_SIGNALS_INCLUDE_DIRECTIONS,
     BACKTEST_TRADES_DEFAULT_GROUP_BY,
     BACKTEST_TRADES_DEFAULT_HORIZON,
     BACKTEST_TRADES_MAX_LEGS_PER_TRADE,
@@ -497,12 +498,21 @@ def _per_ticker_top(
 # 메인 로직 — Signals BT (analysis_results)
 # ---------------------------------------------------------------------------
 
+def _filter_signals_directions(records: list[dict]) -> list[dict]:
+    """signals(analysis_results) 레코드를 BACKTEST_SIGNALS_INCLUDE_DIRECTIONS 기준 필터링.
+    기본은 BUY 만 — 보유 안 한 종목 SELL 은 일반 투자자에게 의미가 없음."""
+    if not BACKTEST_SIGNALS_INCLUDE_DIRECTIONS:
+        return records
+    allowed = BACKTEST_SIGNALS_INCLUDE_DIRECTIONS
+    return [r for r in records if (r.get("signal") or "").upper() in allowed]
+
+
 def _run_signals_backtest_sync(
     lookback_days: int,
     horizons: list[int],
 ) -> dict[str, Any]:
     started = time.time()
-    records = get_analysis_records_for_backtest(lookback_days)
+    records = _filter_signals_directions(get_analysis_records_for_backtest(lookback_days))
     if not records:
         return _empty_result(
             source="analysis_results",
@@ -921,7 +931,7 @@ def _run_live_sync(lookback_days: int, horizons: list[int]) -> dict[str, Any]:
     started = time.time()
 
     # 두 소스 모두 최근 lookback 기간치만 조회. horizon 이상 지난 레코드는 어차피 스킵됨.
-    signals_records = get_analysis_records_for_backtest(lookback_days)
+    signals_records = _filter_signals_directions(get_analysis_records_for_backtest(lookback_days))
     strategy_rows = get_strategy_records_for_backtest(lookback_days)
     strategy_records = [_enrich_strategy_entry(dict(r)) for r in strategy_rows]
 
@@ -1247,7 +1257,7 @@ def _run_trade_history_sync(
                      "strategy_type"]
         portfolio_extra = ["market_regime"]
     else:  # signals
-        records = get_analysis_records_for_backtest(lookback_days)
+        records = _filter_signals_directions(get_analysis_records_for_backtest(lookback_days))
         direction_key = "signal"
         price_key = "price"
         leg_extra = ["signal_source", "divergence", "sentiment"]

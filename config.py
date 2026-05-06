@@ -319,6 +319,13 @@ BACKTEST_DIVERGENCE_BUCKETS: list[tuple[float, float]] = [
     (0.06, 0.13),
     (0.13, float("inf")),
 ]
+# 시그널 백테스트가 평가할 방향 — 보유 안 한 종목 SELL 은 일반 투자자에게
+# 의미가 없어 기본 BUY 만. env 로 "BUY,SELL" 지정 시 둘 다 평가.
+BACKTEST_SIGNALS_INCLUDE_DIRECTIONS = frozenset(
+    s.strip().upper()
+    for s in os.getenv("BACKTEST_SIGNALS_INCLUDE_DIRECTIONS", "BUY").split(",")
+    if s.strip()
+)
 # yfinance 일괄 다운로드 기간 여유(주말/공휴일 대비)
 BACKTEST_PRICE_LOOKAHEAD_DAYS = 14
 
