@@ -274,8 +274,8 @@ def _fetch_macro_value(ticker: str, decimals: int) -> dict:
             raise ValueError("fast_info returned None (yfinance 차단 의심)")
 
         # fast_info 는 LazyDict — 키 접근 자체가 lazy fetch 라 try 안에서 보호
-        price = fi.get("lastPrice") if hasattr(fi, "get") else None
-        prev_close = fi.get("previousClose") if hasattr(fi, "get") else None
+        price = fi.get("lastPrice")
+        prev_close = fi.get("previousClose")
 
         if price is None or not math.isfinite(price):
             raise ValueError("invalid lastPrice")

@@ -27,7 +27,6 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable
 
 import pandas as pd
-import yfinance as yf
 
 from config import (
     BACKTEST_ANNUALIZATION_FACTOR,
@@ -48,12 +47,12 @@ from config import (
     BACKTEST_TRADES_MAX_TRADES,
     BACKTEST_TRADES_VALID_GROUP_BYS,
 )
-from services.yf_limiter import throttled
 from services.crud import (
     get_analysis_records_for_backtest,
     get_strategy_records_for_backtest,
     sanitize_for_json,
 )
+from services.price_store import fetch_close_prices as _fetch_from_store
 
 logger = logging.getLogger(__name__)
 
@@ -165,8 +164,7 @@ def _fetch_close_prices(
         logger.debug("backtest 가격 메모리 캐시 hit (%d tickers, start=%s)", len(tickers), start)
         return cached
 
-    # DB 우선 + yfinance fallback (price_store가 내부에서 upsert까지)
-    from services.price_store import fetch_close_prices as _fetch_from_store
+    # DB 우선 + yfinance fallback (price_store 가 내부에서 upsert까지 처리)
     try:
         close = _fetch_from_store(tickers, start, end)
     except Exception as e:

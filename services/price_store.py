@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -184,37 +185,20 @@ def upsert_price_rows(rows: list[dict]) -> int:
     return written
 
 
-def _last_dates_in_db(tickers: list[str]) -> dict[str, date]:
-    """티커별 DB에 저장된 마지막 거래일 매핑 (조회 1회)."""
-    if not tickers:
-        return {}
-    client = _get_client()
-    try:
-        resp = (
-            client.table(_TABLE)
-            .select("ticker, date")
-            .in_("ticker", list(tickers))
-            .order("date", desc=True)
-            .limit(_PRICE_PAGE_SIZE)
-            .execute()
-        )
-    except Exception as e:
-        logger.warning("last_dates 조회 실패: %s", e)
-        return {}
-    rows = resp.data or []
+def _last_dates_from_df(db_df: pd.DataFrame, tickers: list[str]) -> dict[str, date]:
+    """이미 가져온 db_df 에서 ticker 별 마지막 거래일을 추출 (DB 추가 쿼리 없음)."""
     out: dict[str, date] = {}
-    for r in rows:
-        t = r.get("ticker")
-        d = r.get("date")
-        if not t or not d:
+    if db_df is None or db_df.empty:
+        return out
+    for t in tickers:
+        if t not in db_df.columns:
             continue
-        try:
-            d_obj = datetime.fromisoformat(d).date() if "T" in d else date.fromisoformat(d)
-        except (TypeError, ValueError):
+        series = db_df[t].dropna()
+        if series.empty:
             continue
-        # 정렬 desc 라 첫 등장이 최신 — 이미 키 있으면 더 옛 데이터이므로 무시
-        if t not in out:
-            out[t] = d_obj
+        last_idx = series.index[-1]
+        if hasattr(last_idx, "date"):
+            out[t] = last_idx.date()
     return out
 
 
@@ -245,7 +229,7 @@ def fetch_close_prices(
         if t not in db_df.columns or db_df[t].dropna().empty:
             missing_tickers.append(t)
 
-    last_dates = _last_dates_in_db([t for t in tickers if t not in missing_tickers])
+    last_dates = _last_dates_from_df(db_df, [t for t in tickers if t not in missing_tickers])
     stale_cutoff = end - timedelta(days=PRICE_DB_STALE_DAYS)
     stale_tickers = [
         t for t, last_d in last_dates.items() if last_d < stale_cutoff
@@ -304,6 +288,7 @@ def _active_tickers_recent(days: int = 2, limit: int = 10000) -> list[str]:
             client.table("analysis_results")
             .select("ticker")
             .gte("created_at", cutoff)
+            .order("created_at", desc=True)
             .limit(limit)
             .execute()
         )
@@ -318,8 +303,7 @@ def backfill_recent(days: int | None = None) -> dict[str, Any]:
     최근 N일 active ticker OHLCV 를 yfinance 에서 받아 price_history 에 upsert.
     반환: {'tickers': N, 'rows_written': M, 'elapsed_sec': X}.
     """
-    import time as _time
-    start_ts = _time.time()
+    start_ts = time.time()
     lookback = days or PRICE_BACKFILL_LOOKBACK_DAYS
 
     tickers = _active_tickers_recent()
@@ -349,5 +333,5 @@ def backfill_recent(days: int | None = None) -> dict[str, Any]:
     return {
         "tickers": len(tickers),
         "rows_written": rows_written,
-        "elapsed_sec": round(_time.time() - start_ts, 2),
+        "elapsed_sec": round(time.time() - start_ts, 2),
     }

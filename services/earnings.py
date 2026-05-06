@@ -124,15 +124,9 @@ def get_earnings_surprises(tickers: list[str]) -> list[dict | None]:
     results: list[dict | None] = []
     delay = EARNINGS_INTER_REQUEST_DELAY_SEC
     for i, ticker in enumerate(tickers):
-        # 캐시 확인 — hit이면 sleep 생략(yfinance 호출이 없으니)
-        hit, cached = _cache_get(ticker)
-        if hit:
-            results.append(cached)
-            continue
-        # 실호출 직전에만 inter-request 간격 적용
-        if i > 0 and delay > 0:
+        # 실호출 직전에만 inter-request 간격 적용 (캐시 hit 이면 _fetch 안 부르고 즉시 반환)
+        hit, _ = _cache_get(ticker)
+        if not hit and i > 0 and delay > 0:
             time.sleep(delay)
-        result = _fetch_earnings_surprise(ticker)
-        _cache_put(ticker, result)
-        results.append(result)
+        results.append(get_earnings_surprise(ticker))
     return results

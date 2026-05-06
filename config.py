@@ -3,6 +3,12 @@ import os
 
 load_dotenv()
 
+
+def _bool_env(name: str, default: str = "false") -> bool:
+    """env 값을 truthy 문자열 집합으로 일관 해석한다 (1/true/yes/on 만 True)."""
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
 # Supabase
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -109,9 +115,7 @@ EARNINGS_INTER_REQUEST_DELAY_SEC = float(os.getenv("EARNINGS_INTER_REQUEST_DELAY
 # 같은 ticker 재조회 시 yfinance 호출 없이 즉시 반환 → 429 회피의 핵심.
 EARNINGS_CACHE_TTL_SEC = int(os.getenv("EARNINGS_CACHE_TTL_SEC", "86400"))  # 24h
 # 실패(None)도 캐시할지 — True면 일시 429에 걸린 ticker 도 24h 캐시되어 사이클 부담 ↓
-EARNINGS_CACHE_FAILURES = os.getenv("EARNINGS_CACHE_FAILURES", "true").lower() in (
-    "1", "true", "yes", "on",
-)
+EARNINGS_CACHE_FAILURES = _bool_env("EARNINGS_CACHE_FAILURES", "true")
 # 실패 캐시는 짧게(1시간) — 그날 안에 재시도는 가능하게
 EARNINGS_FAILURE_CACHE_TTL_SEC = int(os.getenv("EARNINGS_FAILURE_CACHE_TTL_SEC", "3600"))  # 1h
 
@@ -260,9 +264,7 @@ BACKTEST_MAX_HORIZON_DAYS = int(os.getenv("BACKTEST_MAX_HORIZON_DAYS", "60"))
 BACKTEST_CACHE_TTL_SEC = int(os.getenv("BACKTEST_CACHE_TTL_SEC", "1800"))  # 30분
 # 백그라운드 자동 워밍: summary + trades 를 주기적으로 호출해 캐시를 유지한다.
 # 워밍 주기는 캐시 TTL 보다 약간 짧아야 사용자 호출이 항상 캐시에 적중한다.
-BACKTEST_AUTO_WARMUP_ENABLED = os.getenv("BACKTEST_AUTO_WARMUP_ENABLED", "true").lower() in (
-    "1", "true", "yes", "on",
-)
+BACKTEST_AUTO_WARMUP_ENABLED = _bool_env("BACKTEST_AUTO_WARMUP_ENABLED", "true")
 BACKTEST_AUTO_WARMUP_INTERVAL_SEC = int(os.getenv("BACKTEST_AUTO_WARMUP_INTERVAL_SEC", "1500"))  # 25분
 # 서버 기동 직후 부담 회피용 초기 지연
 BACKTEST_AUTO_WARMUP_INITIAL_DELAY_SEC = int(os.getenv("BACKTEST_AUTO_WARMUP_INITIAL_DELAY_SEC", "10"))
@@ -278,9 +280,7 @@ BACKTEST_PRICE_CACHE_TTL_SEC = int(os.getenv("BACKTEST_PRICE_CACHE_TTL_SEC", "18
 # Price History (영구 저장) — 백테스트·기술지표 yfinance 호출을 DB 캐시로 대체
 # ---------------------------------------------------------------------------
 # 가격 backfill 백그라운드 루프 활성/주기/지연
-PRICE_BACKFILL_ENABLED = os.getenv("PRICE_BACKFILL_ENABLED", "true").lower() in (
-    "1", "true", "yes", "on",
-)
+PRICE_BACKFILL_ENABLED = _bool_env("PRICE_BACKFILL_ENABLED", "true")
 PRICE_BACKFILL_INTERVAL_SEC = int(os.getenv("PRICE_BACKFILL_INTERVAL_SEC", "21600"))  # 6시간
 PRICE_BACKFILL_INITIAL_DELAY_SEC = int(os.getenv("PRICE_BACKFILL_INITIAL_DELAY_SEC", "60"))
 # backfill 시 매번 받을 최근 거래일 수 (5일이면 새 거래일 + 누락분 보정)

@@ -3,15 +3,18 @@ import logging
 from datetime import datetime
 
 from config import (
-    SCAN_INTERVAL_SEC,
+    ECON_CALENDAR_INTERVAL_SEC,
     ERROR_RETRY_SEC,
-    REPORT_TOP_N,
     MACRO_INTERVAL_SEC,
+    NEWS_FALLBACK_TICKERS,
+    NEWS_FEED_INTERVAL_SEC,
+    PRICE_BACKFILL_ENABLED,
+    PRICE_BACKFILL_INITIAL_DELAY_SEC,
+    PRICE_BACKFILL_INTERVAL_SEC,
     PRICE_TICK_INTERVAL_SEC,
     PRICE_TICK_MAX_SYMBOLS,
-    ECON_CALENDAR_INTERVAL_SEC,
-    NEWS_FEED_INTERVAL_SEC,
-    NEWS_FALLBACK_TICKERS,
+    REPORT_TOP_N,
+    SCAN_INTERVAL_SEC,
 )
 from services.scanner import (
     get_all_tickers,
@@ -25,8 +28,9 @@ from services.sentiment import analyze_sentiments
 from services.earnings import get_earnings_surprises
 from services.analyst import compute_signals
 from services.crud import save_candidates, sanitize_for_json
-from services.websocket import manager, latest_cache
 from services.news_feed import build_news_feed
+from services.price_store import backfill_recent
+from services.websocket import manager, latest_cache
 
 logger = logging.getLogger(__name__)
 
@@ -238,19 +242,11 @@ async def run_price_backfill_loop():
     price_history 테이블에 upsert. 평상시 백테스트·기술지표는 DB 조회만으로 끝나
     yfinance 부담을 거의 0 으로 줄인다.
     """
-    from config import (
-        PRICE_BACKFILL_ENABLED,
-        PRICE_BACKFILL_INITIAL_DELAY_SEC,
-        PRICE_BACKFILL_INTERVAL_SEC,
-    )
-
     if not PRICE_BACKFILL_ENABLED:
         logger.info("가격 backfill 비활성화 — 건너뜀")
         return
 
     await asyncio.sleep(max(0, PRICE_BACKFILL_INITIAL_DELAY_SEC))
-
-    from services.price_store import backfill_recent
 
     while True:
         try:
