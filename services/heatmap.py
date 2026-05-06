@@ -1,4 +1,4 @@
-"""S&P 500 섹터별 히트맵 데이터 — Wikipedia 구성종목 + yfinance 시세/시가총액."""
+"""S&P 500 섹터별 히트맵 데이터 — Wikipedia 구성종목 + price_history(DB) + yfinance fallback."""
 from __future__ import annotations
 
 import asyncio
@@ -6,7 +6,7 @@ import logging
 import math
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import yfinance as yf
@@ -67,35 +67,44 @@ async def _fetch_market_caps(tickers: list[str]) -> dict[str, float | None]:
 # ---------------------------------------------------------------------------
 
 def _fetch_prices(tickers: list[str]) -> dict[str, dict[str, float | None]]:
-    """yfinance batch download로 현재가 + 일일 등락률을 조회한다."""
+    """
+    price_history DB 우선 조회 + 누락 시 yfinance fallback.
+    각 ticker 의 마지막·직전 종가로 일일 등락률 계산.
+    """
     if not tickers:
         return {}
+
+    # 최근 7일치 (주말·공휴일 고려) 가져와서 마지막 두 거래일을 사용
+    end = datetime.now(timezone.utc).date()
+    start = end - timedelta(days=10)
+
     try:
-        df = yf.download(
-            " ".join(tickers),
-            period="2d",
-            interval="1d",
-            group_by="ticker",
-            progress=False,
-            threads=True,
-        )
+        from services.price_store import fetch_close_prices
+        close_df = fetch_close_prices(tickers, start, end)
     except Exception as e:
-        logger.warning("히트맵 가격 다운로드 실패: %s", e)
+        logger.warning("히트맵 price_store 조회 실패: %s", e)
+        return {}
+
+    if close_df is None or close_df.empty:
         return {}
 
     result: dict[str, dict[str, float | None]] = {}
-    single = len(tickers) == 1
-
     for t in tickers:
+        if t not in close_df.columns:
+            continue
+        series = close_df[t].dropna()
+        if series.empty:
+            continue
         try:
-            closes = (df["Close"] if single else df[t]["Close"]).dropna()
-            if len(closes) < 1:
+            price = float(series.iloc[-1])
+            if not math.isfinite(price):
                 continue
-            price = float(closes.iloc[-1])
-            prev = float(closes.iloc[-2]) if len(closes) >= 2 else None
+            prev = float(series.iloc[-2]) if len(series) >= 2 else None
+            if prev is not None and not math.isfinite(prev):
+                prev = None
             change = round((price - prev) / prev * 100, 2) if prev and prev != 0 else None
             result[t] = {"price": round(price, 2), "change_pct": change}
-        except (KeyError, IndexError, TypeError, ValueError):
+        except (IndexError, TypeError, ValueError):
             continue
     return result
 
@@ -173,16 +182,36 @@ async def build_sp500_heatmap() -> dict[str, Any]:
     }
 
 
+def _heatmap_has_content(result: dict[str, Any] | None) -> bool:
+    """결과에 의미 있는 stocks 가 있는지 — yfinance 폭주로 빈 sectors 만 잡혔을 때 가드."""
+    if not result:
+        return False
+    sectors = result.get("sectors") or []
+    if not sectors:
+        return False
+    total_stocks = sum(len(s.get("stocks") or []) for s in sectors)
+    return total_stocks > 0
+
+
 async def _background_refresh() -> None:
-    """백그라운드에서 히트맵을 갱신 → 메모리 + DB 저장."""
+    """백그라운드에서 히트맵을 갱신 → 메모리 + DB 저장. 빈 결과는 DB save 스킵."""
     global _heatmap_cache, _heatmap_cache_at
     try:
         result = await build_sp500_heatmap()
+        if not _heatmap_has_content(result):
+            logger.warning(
+                "히트맵 갱신 결과가 비어있어 DB save 를 건너뜀 — 기존 스냅샷 유지 (yfinance 차단 의심)",
+            )
+            return
         _heatmap_cache = result
         _heatmap_cache_at = time.time()
         from services.crud import save_heatmap_snapshot
         await asyncio.to_thread(save_heatmap_snapshot, result)
-        logger.info("히트맵 백그라운드 갱신 완료")
+        sectors = result.get("sectors") or []
+        total_stocks = sum(len(s.get("stocks") or []) for s in sectors)
+        logger.info(
+            "히트맵 백그라운드 갱신 완료: sectors=%d, stocks=%d", len(sectors), total_stocks,
+        )
     except Exception as e:
         logger.error("히트맵 백그라운드 갱신 실패: %s", e, exc_info=True)
 
