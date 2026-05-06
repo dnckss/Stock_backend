@@ -256,31 +256,51 @@ def merge_intraday_into_candidates(candidates: list[dict], live: dict[str, dict]
 # 3) 매크로 지표 — yfinance fast_info
 # ---------------------------------------------------------------------------
 
+# Ticker 별 마지막 성공값 메모리 캐시 — Yahoo 일시 차단 시 stale fallback 으로 사용.
+_macro_value_cache: dict[str, dict] = {}
+
+
 def _fetch_macro_value(ticker: str, decimals: int) -> dict:
-    """yfinance fast_info로 지표 현재값·변동·변동률을 조회한다."""
+    """
+    yfinance fast_info 로 지표 현재값·변동·변동률을 조회한다.
+    실패(SSL 에러·차단·NoneType 등)하면 마지막 성공값을 stale=True 로 반환해
+    화면에서 직전 값이 사라지지 않게 한다.
+    """
     from services.yf_limiter import throttled
 
     try:
         fi = throttled(lambda: yf.Ticker(ticker).fast_info)
-        price = fi.get("lastPrice")
-        prev_close = fi.get("previousClose")
+        if fi is None:
+            raise ValueError("fast_info returned None (yfinance 차단 의심)")
+
+        # fast_info 는 LazyDict — 키 접근 자체가 lazy fetch 라 try 안에서 보호
+        price = fi.get("lastPrice") if hasattr(fi, "get") else None
+        prev_close = fi.get("previousClose") if hasattr(fi, "get") else None
 
         if price is None or not math.isfinite(price):
-            return {"value": None, "change": None, "pct": None}
+            raise ValueError("invalid lastPrice")
 
         value = round(price, decimals)
         change = None
         pct = None
 
-        if prev_close and math.isfinite(prev_close) and prev_close != 0:
+        if prev_close is not None and math.isfinite(prev_close) and prev_close != 0:
             raw_change = price - prev_close
             change = round(raw_change, decimals)
             pct = round(raw_change / prev_close, 4)
 
-        return {"value": value, "change": change, "pct": pct}
+        result = {"value": value, "change": change, "pct": pct, "stale": False}
+        _macro_value_cache[ticker] = result
+        return result
     except Exception as e:
-        print(f"매크로 지표 조회 실패 ({ticker}): {e}")
-        return {"value": None, "change": None, "pct": None}
+        cached = _macro_value_cache.get(ticker)
+        if cached is not None:
+            logger.warning(
+                "매크로 지표 조회 실패 (%s): %s — 직전 성공값(stale)으로 대체", ticker, e,
+            )
+            return {**cached, "stale": True}
+        logger.warning("매크로 지표 조회 실패 (%s, 캐시 없음): %s", ticker, e)
+        return {"value": None, "change": None, "pct": None, "stale": False}
 
 
 def fetch_macro_indicators() -> dict:
@@ -304,6 +324,7 @@ def fetch_macro_indicators() -> dict:
                 "value": data["value"],
                 "change": data["change"],
                 "pct": data["pct"],
+                "stale": data.get("stale", False),
             })
 
     if not any(item["value"] is not None for items in result.values() for item in items):
