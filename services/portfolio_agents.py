@@ -52,6 +52,21 @@ def _sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {payload}\n\n"
 
 
+async def _aiter_sync(sync_iterable):
+    """
+    OpenAI SDK 의 sync stream 을 async iterator 로 감싼다.
+    각 next() 호출을 to_thread 로 위임해 이벤트 루프 블록을 막는다 — 그렇지 않으면
+    chunk 사이에 SSE keepalive·다른 task 가 못 돌아 클라이언트가 멈춘 것처럼 보인다.
+    """
+    sentinel = object()
+    iterator = iter(sync_iterable)
+    while True:
+        chunk = await asyncio.to_thread(next, iterator, sentinel)
+        if chunk is sentinel:
+            return
+        yield chunk
+
+
 def _parse_agent_result(event: str, agent_name: str) -> dict[str, Any] | None:
     """SSE 이벤트 문자열에서 특정 에이전트의 agent_result 데이터를 추출한다."""
     if not event.startswith("event: agent_result\n"):
@@ -646,7 +661,7 @@ async def _run_portfolio_agent(
     json_buffer = ""
 
     try:
-        for chunk in stream:
+        async for chunk in _aiter_sync(stream):
             delta = chunk.choices[0].delta if chunk.choices else None
             if not delta or not delta.content:
                 continue
@@ -830,7 +845,7 @@ async def _run_xai_agent(
     json_buffer = ""
 
     try:
-        for chunk in stream:
+        async for chunk in _aiter_sync(stream):
             delta = chunk.choices[0].delta if chunk.choices else None
             if not delta or not delta.content:
                 continue

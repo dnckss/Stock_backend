@@ -232,7 +232,8 @@ MAX_VIX = 80.0
 # ---------------------------------------------------------------------------
 # Multi-Agent Portfolio Builder (SSE 스트리밍 + CoT)
 # ---------------------------------------------------------------------------
-PORTFOLIO_AGENT_MODEL = os.getenv("PORTFOLIO_AGENT_MODEL", "gpt-5")
+# 포트폴리오·XAI 에이전트는 응답이 길어 reasoning 모델일수록 멈춘 것처럼 보임 → mini 기본
+PORTFOLIO_AGENT_MODEL = os.getenv("PORTFOLIO_AGENT_MODEL", "gpt-5-mini")
 PORTFOLIO_AGENT_TIMEOUT_SEC = int(os.getenv("PORTFOLIO_AGENT_TIMEOUT_SEC", "600"))
 
 # Monte Carlo 시뮬레이션
