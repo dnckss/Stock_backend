@@ -296,6 +296,37 @@ def get_cached_news_article(url_hash: str) -> dict | None:
     return row
 
 
+def get_news_articles_analysis_by_hashes(hashes: list[str]) -> dict[str, Any]:
+    """
+    url_hash 목록에 대해 news_articles.analysis_json 을 batch 조회.
+    LLM 분석이 있는 항목만 {url_hash: analysis_json} 매핑으로 반환한다.
+    피드 응답에서 LLM polarity 우선 노출에 사용한다.
+    """
+    if not hashes:
+        return {}
+    unique = list({h for h in hashes if h})
+    if not unique:
+        return {}
+    client = _get_client()
+    try:
+        resp = (
+            client.table("news_articles")
+            .select("url_hash, analysis_json")
+            .in_("url_hash", unique)
+            .execute()
+        )
+    except Exception as e:
+        logger.warning("news_articles analysis 조회 실패: %s", e)
+        return {}
+    out: dict[str, Any] = {}
+    for r in resp.data or []:
+        h = r.get("url_hash")
+        a = r.get("analysis_json")
+        if h and a is not None:
+            out[h] = a
+    return out
+
+
 def upsert_news_article(item: dict) -> None:
     """
     news_articles에 url_hash 기준 upsert.

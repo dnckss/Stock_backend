@@ -10,7 +10,11 @@ import yfinance as yf
 
 from config import NEWS_FEED_MAX_ITEMS, NEWS_FEED_TTL_SEC, NEWS_CRAWL_MAX_CONCURRENT
 from services.finbert import analyze_batch
-from services.news_sentiment import normalize_to_polarity, polarity_to_ko
+from services.news_sentiment import (
+    llm_polarity_from_analysis,
+    normalize_to_polarity,
+    polarity_to_ko,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +27,37 @@ def _is_fresh() -> bool:
     if _cache_at is None:
         return False
     return (datetime.now() - _cache_at).total_seconds() < NEWS_FEED_TTL_SEC
+
+
+def enrich_feed_with_llm(feed: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    뉴스 피드 항목에 LLM 분석 결과(news_articles.analysis_json) 가 있으면
+    그 polarity 로 sentiment_polarity/label/ko 를 덮어쓰고 sentiment_source 표시.
+    LLM 분석 없는 항목은 FinBERT 라벨 그대로 + sentiment_source="finbert".
+    """
+    if not feed:
+        return feed
+    hashes = [item.get("url_hash") for item in feed if item.get("url_hash")]
+    analysis_map: dict[str, Any] = {}
+    if hashes:
+        try:
+            from services.crud import get_news_articles_analysis_by_hashes
+            analysis_map = get_news_articles_analysis_by_hashes(hashes)
+        except Exception as e:
+            logger.warning("LLM 분석 enrich 조회 실패: %s", e)
+
+    for item in feed:
+        h = item.get("url_hash")
+        a = analysis_map.get(h) if h else None
+        llm_polarity = llm_polarity_from_analysis(a) if a is not None else None
+        if llm_polarity is None:
+            item.setdefault("sentiment_source", "finbert")
+            continue
+        item["sentiment_polarity"] = llm_polarity
+        item["sentiment_ko"] = polarity_to_ko(llm_polarity)
+        item["sentiment_label"] = llm_polarity
+        item["sentiment_source"] = "llm"
+    return feed
 
 
 def _is_stock_news_fresh(ticker: str) -> bool:
@@ -162,6 +197,7 @@ async def build_news_feed(tickers: list[str]) -> list[dict[str, Any]]:
     except Exception as e:
         logger.warning("뉴스 피드 DB 저장/병합 실패: %s", e)
 
+    feed = enrich_feed_with_llm(feed)
     _cache = feed
     _cache_at = datetime.now()
     return feed
@@ -223,7 +259,12 @@ async def build_stock_news_feed(ticker: str, limit: int = 10, refresh: bool = Fa
             seen_titles.add(item["title"])
             deduped.append(item)
 
-    result = deduped[:safe_limit]
+    # 종목 뉴스에도 url_hash 부여 후 LLM 분석 결과로 polarity 덮어쓰기
+    for item in deduped:
+        url = (item.get("url") or "").strip()
+        if url and not item.get("url_hash"):
+            item["url_hash"] = _hash_url(url)
+    result = enrich_feed_with_llm(deduped[:safe_limit])
     _stock_news_cache[upper] = (datetime.now(), result)
     return result
 

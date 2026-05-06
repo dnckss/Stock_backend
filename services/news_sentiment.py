@@ -49,3 +49,27 @@ def add_normalized_impact_fields(impact: dict) -> dict:
     impact["normalized_direction_ko"] = polarity_to_ko(p)
     return impact
 
+
+def llm_polarity_from_analysis(analysis) -> NewsPolarity | None:
+    """
+    news_articles.analysis_json 에서 LLM 의 impact.direction 을 polarity 3분류로 정규화.
+    분석이 없거나 파싱 실패면 None — 이 경우 호출측은 FinBERT polarity 를 그대로 사용.
+    """
+    if not analysis:
+        return None
+    if isinstance(analysis, str):
+        import json
+        try:
+            analysis = json.loads(analysis)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(analysis, dict):
+        return None
+    impact = analysis.get("impact")
+    if not isinstance(impact, dict):
+        return None
+    direction = impact.get("direction")
+    if not direction:
+        return None
+    return normalize_to_polarity(direction)
+

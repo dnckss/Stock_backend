@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 
 from services.crud import get_news_items, sanitize_for_json
 from services.news_article import get_news_article
+from services.news_feed import enrich_feed_with_llm
 from services.economic_calendar import fetch_economic_calendar
 from services.econ_detail import get_econ_event_detail
 
@@ -17,6 +18,7 @@ async def api_news_list(limit: int = 50, ticker: str | None = None):
     """
     safe_limit = max(1, min(limit, 200))
     items = get_news_items(limit=safe_limit, ticker=ticker)
+    items = enrich_feed_with_llm(items)
     return sanitize_for_json({"items": items, "count": len(items)})
 
 
