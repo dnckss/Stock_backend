@@ -287,6 +287,9 @@ PRICE_BACKFILL_INITIAL_DELAY_SEC = int(os.getenv("PRICE_BACKFILL_INITIAL_DELAY_S
 PRICE_BACKFILL_LOOKBACK_DAYS = int(os.getenv("PRICE_BACKFILL_LOOKBACK_DAYS", "7"))
 # DB 에 저장된 ticker 의 마지막 거래일이 이 일수 이상 오래된 경우 yfinance 재호출 (stale)
 PRICE_DB_STALE_DAYS = int(os.getenv("PRICE_DB_STALE_DAYS", "5"))
+# 범위 커버리지 임계값 — 받은 거래일 수 / 예상 거래일 수 가 이 비율 미만이면 sparse 로 판정해
+# yfinance 에서 범위 전체를 다시 받아 채운다 (예: 90일 요청에 5일만 있는 경우).
+PRICE_DB_COVERAGE_THRESHOLD = float(os.getenv("PRICE_DB_COVERAGE_THRESHOLD", "0.5"))
 # price_history 페이지네이션 안전 상한 (200페이지 × 1000 = 20만 row)
 PRICE_HISTORY_MAX_PAGES = int(os.getenv("PRICE_HISTORY_MAX_PAGES", "200"))
 # 진행 중(open) 포지션 라이브 뷰 — 현재가 자주 변동 → 짧은 TTL

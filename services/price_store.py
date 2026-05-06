@@ -23,6 +23,7 @@ import yfinance as yf
 
 from config import (
     PRICE_BACKFILL_LOOKBACK_DAYS,
+    PRICE_DB_COVERAGE_THRESHOLD,
     PRICE_DB_STALE_DAYS,
     PRICE_HISTORY_MAX_PAGES,
 )
@@ -223,19 +224,28 @@ def fetch_close_prices(
     # 1) DB 조회
     db_df = get_close_prices_db(tickers, start, end)
 
-    # 2) 누락 / stale 판정
+    # 2) 누락 / stale / sparse 판정
     missing_tickers: list[str] = []
     for t in tickers:
         if t not in db_df.columns or db_df[t].dropna().empty:
             missing_tickers.append(t)
 
-    last_dates = _last_dates_from_df(db_df, [t for t in tickers if t not in missing_tickers])
+    non_missing = [t for t in tickers if t not in missing_tickers]
+    last_dates = _last_dates_from_df(db_df, non_missing)
     stale_cutoff = end - timedelta(days=PRICE_DB_STALE_DAYS)
-    stale_tickers = [
-        t for t, last_d in last_dates.items() if last_d < stale_cutoff
-    ]
+    stale_tickers = [t for t, last_d in last_dates.items() if last_d < stale_cutoff]
 
-    fetch_targets = sorted(set(missing_tickers) | set(stale_tickers))
+    # 범위 전체 커버리지 — 최신은 있어도 과거 거래일이 듬성듬성하면 sparse 로 보고
+    # yfinance fallback 으로 빈칸을 채운다 (예: 90일 lookback 에 5일만 있는 경우).
+    span_days = max(1, (end - start).days)
+    expected_trading_days = max(1, int(span_days * 5 / 7))
+    sparse_tickers: list[str] = []
+    for t in non_missing:
+        actual = db_df[t].dropna().shape[0] if t in db_df.columns else 0
+        if actual < expected_trading_days * PRICE_DB_COVERAGE_THRESHOLD:
+            sparse_tickers.append(t)
+
+    fetch_targets = sorted(set(missing_tickers) | set(stale_tickers) | set(sparse_tickers))
 
     # 3) yfinance fallback — DB upsert 는 best-effort, 실패해도 yfinance 결과는 그대로 사용
     if fetch_targets:
