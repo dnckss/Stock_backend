@@ -51,9 +51,14 @@ def _get_stale(ticker: str) -> dict[str, Any] | None:
 
 
 def _is_empty_fundamentals(data: dict[str, Any]) -> bool:
-    """yfinance 차단으로 빈 응답인지 판정 — profile.name 이 없으면 t.info 가 빈 dict."""
+    """
+    yfinance 차단으로 사실상 빈 응답인지 판정.
+    profile.description 은 yfinance info 외엔 못 채워지므로 그게 비어있으면
+    info 자체가 차단된 것으로 간주 (Wikipedia 폴백으로 name/sector 만 있어도 빈 것으로 봄
+    → 다음 호출에서 yfinance 재시도 + 진짜 데이터 들어오면 캐시 갱신).
+    """
     profile = (data or {}).get("profile") or {}
-    return not profile.get("name")
+    return not profile.get("description") and not profile.get("market_cap")
 
 
 # ---------------------------------------------------------------------------
@@ -154,8 +159,27 @@ def _fetch_earnings_dates(t: yf.Ticker) -> pd.DataFrame:
 # Builder 함수 (순수 변환 — API 호출 없음)
 # ---------------------------------------------------------------------------
 
-def _build_profile(info: dict[str, Any]) -> dict[str, Any]:
-    """기업 개요."""
+def _wiki_constituent_lookup(ticker: str) -> dict[str, Any] | None:
+    """SP500 Wikipedia 구성종목에서 ticker 정보 조회 — yfinance 차단 시 fallback."""
+    if not ticker:
+        return None
+    try:
+        from services.scanner import get_sp500_constituents
+        constituents = get_sp500_constituents()
+    except Exception:
+        return None
+    upper = ticker.upper()
+    for c in constituents or []:
+        if (c.get("ticker") or "").upper() == upper:
+            return c
+    return None
+
+
+def _build_profile(info: dict[str, Any], ticker: str | None = None) -> dict[str, Any]:
+    """
+    기업 개요. yfinance info 차단 시 SP500 Wikipedia constituent 로 name/sector
+    최소값 폴백 — 사용자 화면이 완전히 비지 않도록.
+    """
     officers = []
     for o in (info.get("companyOfficers") or [])[:FUNDAMENTALS_MAX_OFFICERS]:
         name = o.get("name")
@@ -167,10 +191,21 @@ def _build_profile(info: dict[str, Any]) -> dict[str, Any]:
     state = info.get("state") or ""
     headquarters = ", ".join(filter(None, [city, state])) or None
 
+    name = info.get("longName") or info.get("shortName")
+    sector = info.get("sector")
+    industry = info.get("industry")
+
+    # yfinance info 가 빈 경우 SP500 constituent 로 보강
+    if (not name or not sector) and ticker:
+        wc = _wiki_constituent_lookup(ticker)
+        if wc:
+            name = name or wc.get("name")
+            sector = sector or wc.get("sector")
+
     return {
-        "name": info.get("longName") or info.get("shortName"),
-        "sector": info.get("sector"),
-        "industry": info.get("industry"),
+        "name": name or (ticker.upper() if ticker else None),
+        "sector": sector,
+        "industry": industry,
         "description": info.get("longBusinessSummary"),
         "website": info.get("website"),
         "employees": info.get("fullTimeEmployees"),
@@ -486,7 +521,7 @@ def fetch_all_fundamentals(ticker: str) -> dict[str, Any]:
     ed = _fetch_earnings_dates(t)
 
     data = {
-        "profile": _build_profile(info),
+        "profile": _build_profile(info, ticker=ticker),
         "indicators": _build_indicators(info, qf, qbs),
         "profitability": _build_profitability(qf),
         "growth": _build_growth(qf),
