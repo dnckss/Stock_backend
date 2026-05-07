@@ -32,6 +32,7 @@ from openai import OpenAI
 
 from config import (
     CHAT_KO_NAME_TO_TICKER,
+    CHAT_LLM_FIRST_TOKEN_TIMEOUT_SEC,
     CHAT_MARKET_KEYWORDS,
     CHAT_MARKET_NEWS_LIMIT,
     CHAT_MAX_HISTORY_MESSAGES,
@@ -39,6 +40,9 @@ from config import (
     CHAT_NEWS_PER_TICKER,
     CHAT_OPENAI_MODEL,
     CHAT_OPENAI_TIMEOUT_SEC,
+    CHAT_STAGE_MARKET_TIMEOUT_SEC,
+    CHAT_STAGE_STOCKS_TIMEOUT_SEC,
+    CHAT_STAGE_TECHNICALS_TIMEOUT_SEC,
     CHAT_TECHNICAL_KEYWORDS,
     CHAT_TEMPERATURE,
     CHAT_USER_MESSAGE_MAX_CHARS,
@@ -66,6 +70,17 @@ _client = OpenAI(
 def _sse(event: str, data: dict[str, Any]) -> str:
     payload = json.dumps(sanitize_for_json(data), ensure_ascii=False)
     return f"event: {event}\ndata: {payload}\n\n"
+
+
+async def _aiter_sync(sync_iterable):
+    """OpenAI sync stream 을 async iter 로 감싸 이벤트 루프 블록 방지."""
+    sentinel = object()
+    iterator = iter(sync_iterable)
+    while True:
+        chunk = await asyncio.to_thread(next, iterator, sentinel)
+        if chunk is sentinel:
+            return
+        yield chunk
 
 
 # ---------------------------------------------------------------------------
@@ -448,21 +463,28 @@ async def stream_chat(
         "attachments": attachments_payload,
     }
 
-    # --- Stage 1: 종목 시세 + 뉴스 (병렬) ---
+    # --- Stage 1: 종목 시세 + 뉴스 (병렬, timeout cap) ---
     if tickers:
         stage_start = time.time()
         yield _sse("stage", {"name": "stocks", "status": "loading", "count": len(tickers)})
+        stage_status = "done"
         try:
-            results = await asyncio.gather(
-                *[_fetch_quote_and_news(t) for t in tickers],
-                return_exceptions=True,
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    *[_fetch_quote_and_news(t) for t in tickers],
+                    return_exceptions=True,
+                ),
+                timeout=CHAT_STAGE_STOCKS_TIMEOUT_SEC,
             )
             context["stocks"] = [r for r in results if not isinstance(r, Exception)]
+        except asyncio.TimeoutError:
+            stage_status = "timeout"
+            logger.warning("chat stocks 단계 timeout (%ss) — 부분 컨텍스트로 진행", CHAT_STAGE_STOCKS_TIMEOUT_SEC)
         except Exception as e:
             logger.warning("chat 종목 수집 실패: %s", e, exc_info=True)
         yield _sse("stage", {
             "name": "stocks",
-            "status": "done",
+            "status": stage_status,
             "elapsed_ms": int((time.time() - stage_start) * 1000),
             "found": [
                 {
@@ -476,35 +498,49 @@ async def stream_chat(
             ],
         })
 
-    # --- Stage 2: 기술적 지표 (조건부) ---
+    # --- Stage 2: 기술적 지표 (조건부, timeout cap) ---
     if include_technicals and context["stocks"]:
         stage_start = time.time()
         yield _sse("stage", {"name": "technicals", "status": "loading"})
+        ok = 0
+        stage_status = "done"
         try:
-            ok = await _augment_with_technicals(context["stocks"])
+            ok = await asyncio.wait_for(
+                _augment_with_technicals(context["stocks"]),
+                timeout=CHAT_STAGE_TECHNICALS_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            stage_status = "timeout"
+            logger.warning("chat technicals 단계 timeout (%ss)", CHAT_STAGE_TECHNICALS_TIMEOUT_SEC)
         except Exception as e:
             logger.warning("chat 기술적 지표 수집 실패: %s", e, exc_info=True)
-            ok = 0
         yield _sse("stage", {
             "name": "technicals",
-            "status": "done",
+            "status": stage_status,
             "elapsed_ms": int((time.time() - stage_start) * 1000),
             "count": ok,
         })
 
-    # --- Stage 3: 시장 컨텍스트 (조건부) ---
+    # --- Stage 3: 시장 컨텍스트 (조건부, timeout cap) ---
     if include_market:
         stage_start = time.time()
         yield _sse("stage", {"name": "market", "status": "loading"})
+        stage_status = "done"
         try:
-            market = await _gather_market_block()
+            market = await asyncio.wait_for(
+                _gather_market_block(),
+                timeout=CHAT_STAGE_MARKET_TIMEOUT_SEC,
+            )
             context["market_news"] = market["market_news"]
             context["strategy_summary"] = market["strategy_summary"]
+        except asyncio.TimeoutError:
+            stage_status = "timeout"
+            logger.warning("chat market 단계 timeout (%ss)", CHAT_STAGE_MARKET_TIMEOUT_SEC)
         except Exception as e:
             logger.warning("chat 시장 컨텍스트 수집 실패: %s", e, exc_info=True)
         yield _sse("stage", {
             "name": "market",
-            "status": "done",
+            "status": stage_status,
             "elapsed_ms": int((time.time() - stage_start) * 1000),
             "has_strategy": context["strategy_summary"] is not None,
             "news_count": len(context["market_news"]),
@@ -569,27 +605,48 @@ async def stream_chat(
 
     full_text = ""
     first_token_ts: float | None = None
-    try:
-        for chunk in stream:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            if not delta or not delta.content:
-                continue
-            text = delta.content
+    stream_iter = _aiter_sync(stream)
+    while True:
+        try:
             if first_token_ts is None:
-                first_token_ts = time.time()
-                yield _sse("stage", {
-                    "name": "llm",
-                    "status": "first_token",
-                    "ttft_ms": int((first_token_ts - start_ts) * 1000),
-                })
-            full_text += text
-            yield _sse("token", {"content": text})
-    except Exception as e:
-        logger.warning("chat 스트리밍 중 오류: %s", e, exc_info=True)
-        yield _sse("error", {"error": f"스트리밍 오류: {e}", "partial": full_text})
-        return
+                chunk = await asyncio.wait_for(
+                    stream_iter.__anext__(),
+                    timeout=CHAT_LLM_FIRST_TOKEN_TIMEOUT_SEC,
+                )
+            else:
+                chunk = await stream_iter.__anext__()
+        except StopAsyncIteration:
+            break
+        except asyncio.TimeoutError:
+            logger.warning(
+                "chat LLM 첫 토큰 timeout (%ss) — 중단",
+                CHAT_LLM_FIRST_TOKEN_TIMEOUT_SEC,
+            )
+            yield _sse("error", {
+                "error": f"LLM 첫 응답이 {CHAT_LLM_FIRST_TOKEN_TIMEOUT_SEC}초 안에 오지 않아 중단합니다.",
+                "partial": full_text,
+            })
+            return
+        except Exception as e:
+            logger.warning("chat 스트리밍 중 오류: %s", e, exc_info=True)
+            yield _sse("error", {"error": f"스트리밍 오류: {e}", "partial": full_text})
+            return
+
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        if not delta or not delta.content:
+            continue
+        text = delta.content
+        if first_token_ts is None:
+            first_token_ts = time.time()
+            yield _sse("stage", {
+                "name": "llm",
+                "status": "first_token",
+                "ttft_ms": int((first_token_ts - start_ts) * 1000),
+            })
+        full_text += text
+        yield _sse("token", {"content": text})
 
     # --- 세션 연결 시 assistant 응답 영구 저장 ---
     if session_id and full_text.strip():

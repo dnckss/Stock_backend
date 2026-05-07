@@ -336,7 +336,15 @@ BACKTEST_PRICE_LOOKAHEAD_DAYS = 14
 # ---------------------------------------------------------------------------
 # 챗봇은 응답 속도가 중요 — 기본값을 경량 모델로. 품질 우선이면 env로 gpt-5 지정.
 CHAT_OPENAI_MODEL = os.getenv("CHAT_OPENAI_MODEL", "gpt-5-mini")
-CHAT_OPENAI_TIMEOUT_SEC = int(os.getenv("CHAT_OPENAI_TIMEOUT_SEC", "90"))
+# OpenAI client 타임아웃 — 60초 안에 답이 오지 않으면 끊는다.
+CHAT_OPENAI_TIMEOUT_SEC = int(os.getenv("CHAT_OPENAI_TIMEOUT_SEC", "30"))
+# 각 stage 별 cap — yfinance 차단 등으로 한 단계가 분 단위로 멈춰도 강제 종료.
+# 모든 stage 가 다 timeout 으로 떨어져도 합이 60초 이하가 되도록 — "최악도 1분 안에 응답".
+CHAT_STAGE_STOCKS_TIMEOUT_SEC = int(os.getenv("CHAT_STAGE_STOCKS_TIMEOUT_SEC", "12"))
+CHAT_STAGE_TECHNICALS_TIMEOUT_SEC = int(os.getenv("CHAT_STAGE_TECHNICALS_TIMEOUT_SEC", "10"))
+CHAT_STAGE_MARKET_TIMEOUT_SEC = int(os.getenv("CHAT_STAGE_MARKET_TIMEOUT_SEC", "6"))
+# LLM 첫 토큰 도착 cap — 이후 토큰은 stream 자체가 끊기지 않으면 계속.
+CHAT_LLM_FIRST_TOKEN_TIMEOUT_SEC = int(os.getenv("CHAT_LLM_FIRST_TOKEN_TIMEOUT_SEC", "28"))
 CHAT_TEMPERATURE = float(os.getenv("CHAT_TEMPERATURE", "0.3"))
 # 질의 1건에서 분석할 티커 최대 수 (과도한 yfinance 호출 방지)
 CHAT_MAX_TICKERS_PER_QUERY = int(os.getenv("CHAT_MAX_TICKERS_PER_QUERY", "3"))
