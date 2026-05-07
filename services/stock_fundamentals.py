@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 # 프로세스 내 TTL 캐시 (fetch_all_fundamentals 전용)
 # ---------------------------------------------------------------------------
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
+# yfinance 차단/rate limit 시 fallback 으로 쓰는 마지막 성공 데이터(영구 보관).
+_stale_store: dict[str, dict[str, Any]] = {}
 _cache_lock = threading.Lock()
 
 
@@ -40,6 +42,18 @@ def _get_cached(ticker: str) -> dict[str, Any] | None:
 def _set_cached(ticker: str, data: dict[str, Any]) -> None:
     with _cache_lock:
         _cache[ticker] = (time.time(), data)
+        _stale_store[ticker] = data
+
+
+def _get_stale(ticker: str) -> dict[str, Any] | None:
+    with _cache_lock:
+        return _stale_store.get(ticker)
+
+
+def _is_empty_fundamentals(data: dict[str, Any]) -> bool:
+    """yfinance 차단으로 빈 응답인지 판정 — profile.name 이 없으면 t.info 가 빈 dict."""
+    profile = (data or {}).get("profile") or {}
+    return not profile.get("name")
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +470,11 @@ def _quarter_date_str(df: pd.DataFrame, col_idx: int) -> str | None:
 # ---------------------------------------------------------------------------
 
 def fetch_all_fundamentals(ticker: str) -> dict[str, Any]:
-    """전체 펀더멘털 데이터를 한 번에 조회한다 (캐시 적용)."""
+    """
+    전체 펀더멘털 데이터를 한 번에 조회한다.
+    - TTL 캐시 hit 시 즉시 반환
+    - yfinance 차단으로 빈 응답이 오면 캐시 저장 안 하고 직전 성공 데이터(stale) 반환
+    """
     cached = _get_cached(ticker)
     if cached is not None:
         return cached
@@ -477,6 +495,13 @@ def fetch_all_fundamentals(ticker: str) -> dict[str, Any]:
         "price_performance": _build_price_performance(ticker),
     }
 
+    if _is_empty_fundamentals(data):
+        stale = _get_stale(ticker)
+        if stale is not None:
+            return {**stale, "stale": True}
+        return data
+
+    data["stale"] = False
     _set_cached(ticker, data)
     return data
 

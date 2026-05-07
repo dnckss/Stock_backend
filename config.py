@@ -49,7 +49,8 @@ STOCK_PROFILE_TIMEOUT_SEC = float(os.getenv("STOCK_PROFILE_TIMEOUT_SEC", "6"))
 FUNDAMENTALS_MAX_QUARTERS = int(os.getenv("FUNDAMENTALS_MAX_QUARTERS", "12"))
 FUNDAMENTALS_MAX_OFFICERS = int(os.getenv("FUNDAMENTALS_MAX_OFFICERS", "5"))
 FUNDAMENTALS_MAX_EARNINGS_HISTORY = int(os.getenv("FUNDAMENTALS_MAX_EARNINGS_HISTORY", "8"))
-FUNDAMENTALS_CACHE_TTL_SEC = int(os.getenv("FUNDAMENTALS_CACHE_TTL_SEC", "300"))
+# 분기 단위 데이터라 자주 안 바뀜 — TTL 1시간으로 yfinance 호출 횟수 줄임 (rate limit 회피)
+FUNDAMENTALS_CACHE_TTL_SEC = int(os.getenv("FUNDAMENTALS_CACHE_TTL_SEC", "3600"))
 FUNDAMENTALS_VALID_SECTIONS = frozenset({
     "profile", "indicators", "profitability", "growth", "stability", "earnings",
     "price_performance",
