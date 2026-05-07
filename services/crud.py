@@ -439,8 +439,17 @@ def get_latest_scan_records(
 # Economic Calendar
 # ---------------------------------------------------------------------------
 
+_ECON_PRESERVE_FIELDS = ("actual", "forecast", "previous")
+
+
 def upsert_economic_events(events: list[dict]) -> None:
-    """경제 일정 이벤트를 DB에 upsert한다. 배치 내 중복 키는 마지막 값만 유지."""
+    """
+    경제 일정 이벤트를 DB에 upsert한다. 배치 내 중복 키는 마지막 값만 유지.
+
+    actual/forecast/previous 보존: 신규 응답에서 이 필드들이 빈값(None/"")이면
+    DB의 기존 값을 유지한다. myfxbook/ForexFactory 가 일시적으로 같은 이벤트의
+    actual 을 비워서 내려보내도, 한 번 발표된 값이 사라지지 않게 한다.
+    """
     if not events:
         return
     client = _get_client()
@@ -457,11 +466,52 @@ def upsert_economic_events(events: list[dict]) -> None:
             "currency": e.get("currency"),
             "importance": e.get("importance", 0),
             "event": e.get("event"),
-            "actual": e.get("actual"),
-            "forecast": e.get("forecast"),
-            "previous": e.get("previous"),
+            "actual": e.get("actual") or None,
+            "forecast": e.get("forecast") or None,
+            "previous": e.get("previous") or None,
         }
     rows = list(seen.values())
+
+    # 보존 필드 중 하나라도 비어 있는 행만 DB 기존값 조회
+    needs_check = [r for r in rows if any(not r.get(f) for f in _ECON_PRESERVE_FIELDS)]
+    preserved_count = 0
+    if needs_check:
+        dates = sorted({r["event_date"] for r in needs_check if r.get("event_date")})
+        if dates:
+            try:
+                resp = (
+                    client.table("economic_events")
+                    .select("event_date,event_time,event,currency,actual,forecast,previous")
+                    .gte("event_date", dates[0])
+                    .lte("event_date", dates[-1])
+                    .execute()
+                )
+                existing_map: dict[tuple, dict] = {
+                    (
+                        row.get("event_date"),
+                        row.get("event_time") or None,
+                        row.get("event"),
+                        row.get("currency"),
+                    ): row
+                    for row in (resp.data or [])
+                }
+            except Exception as e:
+                logger.warning("경제 일정 기존값 조회 실패 — 보존 스킵: %s", e)
+                existing_map = {}
+
+            for r in needs_check:
+                key = (r["event_date"], r["event_time"] or None, r["event"], r["currency"])
+                existing = existing_map.get(key)
+                if not existing:
+                    continue
+                for f in _ECON_PRESERVE_FIELDS:
+                    if not r.get(f) and existing.get(f):
+                        r[f] = existing[f]
+                        preserved_count += 1
+
+    if preserved_count:
+        logger.info("경제 일정 upsert: %d개 필드 기존값 보존", preserved_count)
+
     client.table("economic_events").upsert(
         rows, on_conflict="event_date,event_time,event,currency"
     ).execute()
