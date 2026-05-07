@@ -506,54 +506,44 @@ def fetch_all_fundamentals(ticker: str) -> dict[str, Any]:
     return data
 
 
+def _section_from_full(ticker: str, key: str) -> dict[str, Any]:
+    """
+    섹션별 fetcher 공통 로직 — fetch_all_fundamentals 의 결과에서 한 섹션만 슬라이스.
+    같은 캐시·stale_store 를 공유해 yfinance 차단 시에도 직전 데이터(stale=True) 노출.
+    """
+    full = fetch_all_fundamentals(ticker)
+    return {
+        key: full.get(key) or {},
+        "stale": full.get("stale", False),
+    }
+
+
 def fetch_profile(ticker: str) -> dict[str, Any]:
-    """기업 개요만 조회한다."""
-    t = yf.Ticker(ticker)
-    info = _fetch_info(t)
-    return {"profile": _build_profile(info)}
+    return _section_from_full(ticker, "profile")
 
 
 def fetch_indicators(ticker: str) -> dict[str, Any]:
-    """투자 지표만 조회한다."""
-    t = yf.Ticker(ticker)
-    info = _fetch_info(t)
-    qf = _fetch_quarterly_financials(t)
-    qbs = _fetch_quarterly_balance_sheet(t)
-    return {"indicators": _build_indicators(info, qf, qbs)}
+    return _section_from_full(ticker, "indicators")
 
 
 def fetch_profitability(ticker: str) -> dict[str, Any]:
-    """수익성만 조회한다."""
-    t = yf.Ticker(ticker)
-    qf = _fetch_quarterly_financials(t)
-    return {"profitability": _build_profitability(qf)}
+    return _section_from_full(ticker, "profitability")
 
 
 def fetch_growth(ticker: str) -> dict[str, Any]:
-    """성장성만 조회한다."""
-    t = yf.Ticker(ticker)
-    qf = _fetch_quarterly_financials(t)
-    return {"growth": _build_growth(qf)}
+    return _section_from_full(ticker, "growth")
 
 
 def fetch_stability(ticker: str) -> dict[str, Any]:
-    """안정성만 조회한다."""
-    t = yf.Ticker(ticker)
-    qbs = _fetch_quarterly_balance_sheet(t)
-    return {"stability": _build_stability(qbs)}
+    return _section_from_full(ticker, "stability")
 
 
 def fetch_earnings(ticker: str) -> dict[str, Any]:
-    """실적만 조회한다."""
-    t = yf.Ticker(ticker)
-    info = _fetch_info(t)
-    ed = _fetch_earnings_dates(t)
-    return {"earnings": _build_earnings(info, ed)}
+    return _section_from_full(ticker, "earnings")
 
 
 def fetch_price_performance(ticker: str) -> dict[str, Any]:
-    """기간별 등락률·거래량·거래대금만 조회한다."""
-    return {"price_performance": _build_price_performance(ticker)}
+    return _section_from_full(ticker, "price_performance")
 
 
 # 섹션 이름 → fetch 함수 매핑 (라우터에서 사용)
