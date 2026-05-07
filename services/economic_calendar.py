@@ -23,6 +23,8 @@ _cache_at: datetime | None = None
 _KST = timezone(timedelta(hours=9))
 
 _MYFXBOOK_URL = "https://www.myfxbook.com/forex-economic-calendar"
+# ForexFactory 공개 JSON — myfxbook 차단(403) 시 fallback. 이번주 7일치 제공.
+_FOREXFACTORY_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 
 _HEADERS = {
     "User-Agent": (
@@ -30,6 +32,14 @@ _HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/123.0.0.0 Safari/537.36"
     ),
+}
+
+_FF_IMPACT_MAP = {
+    "high": 3,
+    "medium": 2,
+    "low": 1,
+    "holiday": 0,
+    "non-economic": 0,
 }
 
 _IMPACT_MAP = {
@@ -307,18 +317,76 @@ def _to_response_item(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def _fetch_forexfactory(client: httpx.AsyncClient) -> list[dict[str, Any]]:
+    """ForexFactory 공개 JSON 에서 이번주 7일치 경제 일정을 가져온다."""
+    try:
+        resp = await client.get(_FOREXFACTORY_URL)
+        if resp.status_code != 200:
+            logger.warning("ForexFactory HTTP %d", resp.status_code)
+            return []
+        data = resp.json()
+    except Exception as e:
+        logger.warning("ForexFactory 요청 실패: %s", e)
+        return []
+
+    if not isinstance(data, list):
+        return []
+
+    events: list[dict[str, Any]] = []
+    for item in data:
+        title = (item.get("title") or "").strip()
+        date_str = item.get("date") or ""
+        if not title or not date_str:
+            continue
+        try:
+            dt_kst = datetime.fromisoformat(date_str).astimezone(_KST)
+        except (ValueError, TypeError):
+            continue
+        currency = (item.get("country") or "").upper()
+        country_code, country_name = _CURRENCY_COUNTRY.get(currency, (currency, ""))
+        importance = _FF_IMPACT_MAP.get((item.get("impact") or "").lower(), 0)
+
+        events.append({
+            "event_date": dt_kst.strftime("%Y-%m-%d"),
+            "date_label": _format_date_label(dt_kst),
+            "time_label": dt_kst.strftime("%H:%M"),
+            "event_at": dt_kst.isoformat(),
+            "country_code": country_code or None,
+            "country_name": country_name or None,
+            "currency": currency or None,
+            "importance": importance,
+            "event": title,
+            "actual": item.get("actual") or None,
+            "forecast": item.get("forecast") or None,
+            "previous": item.get("previous") or None,
+        })
+    return events
+
+
 async def _fetch_and_save() -> list[dict[str, Any]]:
-    """myfxbook에서 경제 일정을 크롤링하여 DB에 저장하고 반환한다."""
+    """myfxbook 우선 시도, 차단·실패 시 ForexFactory fallback. 결과를 DB에 upsert."""
     timeout = httpx.Timeout(ECON_CALENDAR_TIMEOUT_SEC)
     async with httpx.AsyncClient(
         timeout=timeout, follow_redirects=True, headers=_HEADERS
     ) as client:
-        resp = await client.get(_MYFXBOOK_URL)
-        if resp.status_code != 200:
-            logger.warning("myfxbook HTTP %d", resp.status_code)
-            return []
+        events: list[dict[str, Any]] = []
 
-        events = _scrape_myfxbook(resp.text)
+        # 1차: myfxbook
+        try:
+            resp = await client.get(_MYFXBOOK_URL)
+            if resp.status_code == 200:
+                events = _scrape_myfxbook(resp.text)
+            else:
+                logger.warning("myfxbook HTTP %d — ForexFactory fallback 시도", resp.status_code)
+        except Exception as e:
+            logger.warning("myfxbook 요청 실패: %s — ForexFactory fallback 시도", e)
+
+        # 2차: ForexFactory (myfxbook 빈 결과 / 차단 시)
+        if not events:
+            events = await _fetch_forexfactory(client)
+            if events:
+                logger.info("ForexFactory 에서 %d건 수집 (myfxbook 차단)", len(events))
+
         if not events:
             return []
 
