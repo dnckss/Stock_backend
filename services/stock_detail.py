@@ -20,16 +20,16 @@ _company_info_cache: dict[str, dict[str, Any]] = {}
 # 차트 인터벌별 기간/yfinance 인터벌 매핑
 # key = 프론트가 보내는 값, value = (yfinance period, yfinance interval)
 _CHART_PRESETS: dict[str, tuple[str, str]] = {
-    # 분봉
+    # 분봉 (yfinance 자체 제한 — 분봉은 짧은 기간만 제공)
     "1min": ("7d", "1m"),        # 1분봉 — 최대 7일
     "5min": ("60d", "5m"),       # 5분봉 — 최대 60일
     "30min": ("60d", "30m"),     # 30분봉 — 최대 60일
     "60min": ("60d", "60m"),     # 60분봉 — 최대 60일
-    # 일봉 이상
-    "day": ("1y", "1d"),         # 일봉 — 1년
-    "week": ("5y", "1wk"),       # 주봉 — 5년
-    "month": ("10y", "1mo"),     # 월봉 — 10년
-    "year": ("max", "3mo"),      # 년봉(분기) — 전체
+    # 일봉 이상 — 가능한 한 긴 history 를 노출 (yfinance 가 종목별 상장일까지 알아서 끊음)
+    "day": ("5y", "1d"),         # 일봉 — 5년
+    "week": ("10y", "1wk"),      # 주봉 — 10년
+    "month": ("max", "1mo"),     # 월봉 — 전체
+    "year": ("max", "3mo"),      # 분기봉 — 전체
 }
 
 
