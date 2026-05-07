@@ -456,15 +456,22 @@ def upsert_economic_events(events: list[dict]) -> None:
 
 
 def get_economic_events(date_from: str | None = None, limit: int = 0) -> list[dict]:
-    """경제 일정을 시간순으로 조회한다. date_from이 None이면 전체, limit=0이면 무제한."""
-    client = _get_client()
-    query = client.table("economic_events").select("*").order("event_at", desc=False)
-    if date_from:
-        query = query.gte("event_date", date_from)
+    """
+    경제 일정을 시간순으로 조회한다. date_from이 None이면 전체, limit=0이면 무제한.
+    PostgREST 기본 1000-row cap 을 페이지네이션으로 우회 — 5월 신규가 빠지던 문제 해결.
+    """
+    cols = "*"
+
+    def _build(client):
+        q = client.table("economic_events").select(cols).order("event_at", desc=False)
+        if date_from:
+            q = q.gte("event_date", date_from)
+        return q
+
+    rows = _paginate(_build, select_cols=cols)
     if limit > 0:
-        query = query.limit(limit)
-    resp = query.execute()
-    return _sanitize(resp.data)
+        rows = rows[:limit]
+    return _sanitize(rows)
 
 
 # ---------------------------------------------------------------------------
