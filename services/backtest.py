@@ -499,12 +499,22 @@ def _per_ticker_top(
 # ---------------------------------------------------------------------------
 
 def _filter_signals_directions(records: list[dict]) -> list[dict]:
-    """signals(analysis_results) 레코드를 BACKTEST_SIGNALS_INCLUDE_DIRECTIONS 기준 필터링.
-    기본은 BUY 만 — 보유 안 한 종목 SELL 은 일반 투자자에게 의미가 없음."""
+    """
+    signals(analysis_results) 레코드를 BACKTEST_SIGNALS_INCLUDE_DIRECTIONS 기준 필터링.
+    이미 DB 쿼리에서 동일 필터가 적용되므로 호출자가 _signals_directions_list() 를
+    crud 함수에 전달하면 이 Python 단 필터는 사실상 noop. 안전망으로만 남겨둠.
+    """
     if not BACKTEST_SIGNALS_INCLUDE_DIRECTIONS:
         return records
     allowed = BACKTEST_SIGNALS_INCLUDE_DIRECTIONS
     return [r for r in records if (r.get("signal") or "").upper() in allowed]
+
+
+def _signals_directions_list() -> list[str] | None:
+    """crud.get_analysis_records_for_backtest 에 넘길 directions 인자."""
+    if not BACKTEST_SIGNALS_INCLUDE_DIRECTIONS:
+        return None
+    return list(BACKTEST_SIGNALS_INCLUDE_DIRECTIONS)
 
 
 def _run_signals_backtest_sync(
@@ -512,7 +522,7 @@ def _run_signals_backtest_sync(
     horizons: list[int],
 ) -> dict[str, Any]:
     started = time.time()
-    records = _filter_signals_directions(get_analysis_records_for_backtest(lookback_days))
+    records = _filter_signals_directions(get_analysis_records_for_backtest(lookback_days, directions=_signals_directions_list()))
     if not records:
         return _empty_result(
             source="analysis_results",
@@ -959,7 +969,7 @@ def _run_live_sync(lookback_days: int, horizons: list[int]) -> dict[str, Any]:
     started = time.time()
 
     # 두 소스 모두 최근 lookback 기간치만 조회. horizon 이상 지난 레코드는 어차피 스킵됨.
-    signals_records = _filter_signals_directions(get_analysis_records_for_backtest(lookback_days))
+    signals_records = _filter_signals_directions(get_analysis_records_for_backtest(lookback_days, directions=_signals_directions_list()))
     strategy_rows = get_strategy_records_for_backtest(lookback_days)
     strategy_records = [_enrich_strategy_entry(dict(r)) for r in strategy_rows]
 
@@ -1285,7 +1295,7 @@ def _run_trade_history_sync(
                      "strategy_type"]
         portfolio_extra = ["market_regime"]
     else:  # signals
-        records = _filter_signals_directions(get_analysis_records_for_backtest(lookback_days))
+        records = _filter_signals_directions(get_analysis_records_for_backtest(lookback_days, directions=_signals_directions_list()))
         direction_key = "signal"
         price_key = "price"
         leg_extra = ["signal_source", "divergence", "sentiment"]

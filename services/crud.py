@@ -185,26 +185,38 @@ def _paginate(query_builder_fn, *, select_cols: str) -> list[dict]:
     return collected
 
 
-def get_analysis_records_for_backtest(days: int) -> list[dict]:
+def get_analysis_records_for_backtest(
+    days: int,
+    directions: list[str] | None = None,
+) -> list[dict]:
     """
     백테스팅용 — 과거 N일 이내 analysis_results 중 시그널/가격이 유효한 레코드만.
-    오래된 순으로 정렬(누적 곡선 계산 용이). 페이지네이션으로 1000건 제한 우회.
+    오래된 순으로 정렬(누적 곡선 계산 용이). 페이지네이션으로 1000-row 제한 우회.
+
+    directions: ["BUY"], ["BUY","SELL"] 등으로 DB 단계에서 필터링 — 50K 안전상한
+    cap 에 더 일찍 부딪히지 않게 한다 (BUY 만이면 약 7K 건 정도라 cap 무관).
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     cols = (
         "ticker, price, volume, divergence, sentiment, price_return, "
         "signal, signal_source, created_at"
     )
+    allowed = (
+        sorted({(d or "").upper() for d in directions if d})
+        if directions else None
+    )
 
     def _build(client):
-        return (
+        q = (
             client.table("analysis_results")
             .select(cols)
             .gte("created_at", cutoff)
             .not_.is_("signal", "null")
             .not_.is_("price", "null")
-            .order("created_at", desc=False)
         )
+        if allowed:
+            q = q.in_("signal", allowed)
+        return q.order("created_at", desc=False)
 
     return _sanitize(_paginate(_build, select_cols=cols))
 
