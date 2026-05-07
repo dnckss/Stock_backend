@@ -29,6 +29,9 @@ MIN_VOLUME = 1_000_000
 SCAN_TOP_N = 15
 SCAN_TRADING_DAYS = 5  # 등락률 계산 기준 거래일 수
 REPORT_TOP_N = 2
+# 분석 사이클 안정성: scan_stocks 결과가 이 개수 미만이면 yfinance 부분 차단/장시간 누적 오류로
+# 간주하고 직전 스냅샷(메모리→DB)을 유지한다. 새 1~2개 결과로 top_picks/radar 를 덮어쓰지 않는다.
+MIN_TOP_PICKS_FRESH = int(os.getenv("MIN_TOP_PICKS_FRESH", "5"))
 
 # Cycle
 SCAN_INTERVAL_SEC = 3600

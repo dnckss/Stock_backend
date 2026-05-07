@@ -6,6 +6,7 @@ from config import (
     ECON_CALENDAR_INTERVAL_SEC,
     ERROR_RETRY_SEC,
     MACRO_INTERVAL_SEC,
+    MIN_TOP_PICKS_FRESH,
     NEWS_FALLBACK_TICKERS,
     NEWS_FEED_INTERVAL_SEC,
     PRICE_BACKFILL_ENABLED,
@@ -27,12 +28,45 @@ from services.scanner import (
 from services.sentiment import analyze_sentiments
 from services.earnings import get_earnings_surprises
 from services.analyst import compute_signals
-from services.crud import save_candidates, sanitize_for_json
+from services.crud import get_latest_scan_records, save_candidates, sanitize_for_json
 from services.news_feed import build_news_feed
 from services.price_store import backfill_recent
 from services.websocket import manager, latest_cache
 
 logger = logging.getLogger(__name__)
+
+
+async def _preserve_or_restore_snapshot(reason: str) -> None:
+    """
+    스캔 결과가 부실할 때 직전 스냅샷을 유지한다.
+    메모리 캐시에도 top_picks 가 없으면 DB(analysis_results) 마지막 스냅샷으로 복원한다.
+    어느 쪽이든 'scan_stale=True' 마커를 부여해 프런트가 stale 상태를 식별할 수 있게 한다.
+    """
+    if latest_cache.get("top_picks"):
+        latest_cache["scan_stale"] = True
+        latest_cache["scan_stale_reason"] = reason
+        latest_cache["updated_at"] = datetime.now().isoformat()
+        await manager.broadcast({"type": "MARKET_UPDATE", **sanitize_for_json(latest_cache)})
+        logger.info("직전 스냅샷 유지 (메모리 캐시): %s", reason)
+        return
+
+    try:
+        cached_records = await asyncio.to_thread(get_latest_scan_records)
+    except Exception as e:
+        logger.warning("DB 스냅샷 복원 실패: %s", e)
+        return
+
+    if not cached_records:
+        logger.warning("DB 스냅샷도 비어있음 — 캐시 복원 불가 (%s)", reason)
+        return
+
+    latest_cache["top_picks"] = cached_records[:REPORT_TOP_N]
+    latest_cache["radar"] = cached_records[REPORT_TOP_N:]
+    latest_cache["scan_stale"] = True
+    latest_cache["scan_stale_reason"] = reason
+    latest_cache["updated_at"] = datetime.now().isoformat()
+    await manager.broadcast({"type": "MARKET_UPDATE", **sanitize_for_json(latest_cache)})
+    logger.info("DB 스냅샷 %d건으로 복원 (%s)", len(cached_records), reason)
 
 
 async def run_analysis_loop():
@@ -53,8 +87,15 @@ async def run_analysis_loop():
             logger.info("스캔 엔진 가동: %s", start.strftime("%H:%M:%S"))
 
             candidates = await asyncio.to_thread(scan_stocks, tickers)
-            if not candidates:
-                logger.warning("유효 종목 0개 — 다음 사이클 대기")
+            # 장시간 운용 중 yfinance 일시 차단/배치 실패가 누적되면 candidates 가
+            # 1~2개로 줄어들 수 있다. 이 경우 직전 스냅샷을 유지해 대시보드가
+            # "갑자기 1개"로 보이는 현상을 방지한다.
+            if len(candidates) < MIN_TOP_PICKS_FRESH:
+                reason = (
+                    f"유효 종목 {len(candidates)}개 (< MIN_TOP_PICKS_FRESH={MIN_TOP_PICKS_FRESH})"
+                )
+                logger.warning("%s — 직전 스냅샷 유지/복원, 다음 사이클 대기", reason)
+                await _preserve_or_restore_snapshot(reason)
                 await asyncio.sleep(ERROR_RETRY_SEC)
                 continue
 
@@ -82,6 +123,8 @@ async def run_analysis_loop():
             top = candidates[:REPORT_TOP_N]
             latest_cache["top_picks"] = top
             latest_cache["radar"] = candidates[REPORT_TOP_N:]
+            latest_cache["scan_stale"] = False
+            latest_cache["scan_stale_reason"] = None
             latest_cache["updated_at"] = datetime.now().isoformat()
             await manager.broadcast({"type": "MARKET_UPDATE", **sanitize_for_json(latest_cache)})
 
