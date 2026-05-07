@@ -160,6 +160,47 @@ NEWS_ANALYSIS_INPUT_MAX_CHARS = int(os.getenv("NEWS_ANALYSIS_INPUT_MAX_CHARS", "
 # Macro Indicators
 MACRO_INTERVAL_SEC = int(os.getenv("MACRO_INTERVAL_SEC", "60"))  # 1분 주기
 
+# ---------------------------------------------------------------------------
+# Global Markets Overview (/api/markets/global)
+# ---------------------------------------------------------------------------
+GLOBAL_MARKETS_CACHE_TTL_SEC = int(os.getenv("GLOBAL_MARKETS_CACHE_TTL_SEC", "300"))  # 5분
+
+# 글로벌 지수 — 응답의 symbol 은 사용자 친화 라벨, ticker 는 yfinance 호출용
+GLOBAL_INDICES = [
+    {"symbol": "KOSPI",   "ticker": "^KS11",     "name": "코스피",         "country": "KR", "decimals": 2},
+    {"symbol": "KOSDAQ",  "ticker": "^KQ11",     "name": "코스닥",         "country": "KR", "decimals": 2},
+    {"symbol": "NI225",   "ticker": "^N225",     "name": "닛케이225",      "country": "JP", "decimals": 2},
+    {"symbol": "HSI",     "ticker": "^HSI",      "name": "항셍지수",       "country": "HK", "decimals": 2},
+    {"symbol": "SSE",     "ticker": "000001.SS", "name": "상하이종합",     "country": "CN", "decimals": 2},
+    {"symbol": "SPX",     "ticker": "^GSPC",     "name": "S&P 500",        "country": "US", "decimals": 2},
+    {"symbol": "IXIC",    "ticker": "^IXIC",     "name": "NASDAQ",         "country": "US", "decimals": 2},
+    {"symbol": "DJI",     "ticker": "^DJI",      "name": "다우존스",       "country": "US", "decimals": 2},
+    {"symbol": "DAX",     "ticker": "^GDAXI",    "name": "DAX",            "country": "DE", "decimals": 2},
+    {"symbol": "FTSE",    "ticker": "^FTSE",     "name": "FTSE 100",       "country": "GB", "decimals": 2},
+    {"symbol": "CAC",     "ticker": "^FCHI",     "name": "CAC 40",         "country": "FR", "decimals": 2},
+    {"symbol": "ESTX50",  "ticker": "^STOXX50E", "name": "Euro Stoxx 50",  "country": "EU", "decimals": 2},
+]
+
+# 원자재 (yfinance futures)
+GLOBAL_COMMODITIES = [
+    {"symbol": "GC=F",  "ticker": "GC=F",  "name": "Gold",        "decimals": 2},
+    {"symbol": "SI=F",  "ticker": "SI=F",  "name": "Silver",      "decimals": 3},
+    {"symbol": "CL=F",  "ticker": "CL=F",  "name": "WTI Crude",   "decimals": 2},
+    {"symbol": "BZ=F",  "ticker": "BZ=F",  "name": "Brent Crude", "decimals": 2},
+    {"symbol": "NG=F",  "ticker": "NG=F",  "name": "Natural Gas", "decimals": 3},
+    {"symbol": "HG=F",  "ticker": "HG=F",  "name": "Copper",      "decimals": 4},
+]
+
+# 환율 (yfinance FX) + Dollar Index
+GLOBAL_CURRENCIES = [
+    {"symbol": "USDKRW", "ticker": "USDKRW=X", "name": "USD/KRW", "decimals": 2},
+    {"symbol": "USDJPY", "ticker": "USDJPY=X", "name": "USD/JPY", "decimals": 3},
+    {"symbol": "USDCNY", "ticker": "USDCNY=X", "name": "USD/CNY", "decimals": 4},
+    {"symbol": "EURUSD", "ticker": "EURUSD=X", "name": "EUR/USD", "decimals": 4},
+    {"symbol": "GBPUSD", "ticker": "GBPUSD=X", "name": "GBP/USD", "decimals": 4},
+    {"symbol": "DXY",    "ticker": "DX-Y.NYB", "name": "Dollar Index", "decimals": 2},
+]
+
 # yfinance 심볼 컨벤션:
 #   인덱스  → ^GSPC(S&P500), ^IXIC(NASDAQ), ^DJI(DOW), ^VIX
 #   FX      → USDKRW=X, USDJPY=X, EURUSD=X

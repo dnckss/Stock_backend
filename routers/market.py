@@ -22,3 +22,10 @@ async def api_heatmap_sp500():
     """S&P 500 섹터별 히트맵 데이터 (시가총액·등락률·현재가)"""
     from services.heatmap import get_cached_sp500_heatmap
     return sanitize_for_json(await get_cached_sp500_heatmap())
+
+
+@router.get("/markets/global")
+async def api_markets_global(refresh: int = 0):
+    """글로벌 마켓 오버뷰 — 국제 지수·원자재·환율 (5분 캐시)."""
+    from services.global_markets import fetch_global_markets
+    return await fetch_global_markets(refresh=bool(refresh))
