@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 
-from services.crud import get_news_items, sanitize_for_json
+from services.crud import count_news_items, get_news_items, sanitize_for_json
 from services.news_article import get_news_article
 from services.news_feed import enrich_feed_with_llm
 from services.economic_calendar import fetch_economic_calendar
@@ -10,16 +10,32 @@ router = APIRouter(prefix="/api", tags=["News"])
 
 
 @router.get("/news/list")
-async def api_news_list(limit: int = 50, ticker: str | None = None):
+async def api_news_list(
+    limit: int = 50,
+    offset: int = 0,
+    ticker: str | None = None,
+    with_count: int = 0,
+):
     """
-    DB에 저장된 뉴스 목록 조회.
-    - limit: 반환 개수 (기본 50)
+    DB 에 저장된 뉴스 목록 조회 (페이지네이션).
+    - limit: 반환 개수 (기본 50, 최대 500)
+    - offset: 시작 오프셋 (기본 0)
     - ticker: 특정 종목 필터 (선택)
+    - with_count=1: total(전체 행 수) 동봉. 부담이 있으니 첫 페이지에서만 권장.
     """
-    safe_limit = max(1, min(limit, 200))
-    items = get_news_items(limit=safe_limit, ticker=ticker)
+    safe_limit = max(1, min(limit, 500))
+    safe_offset = max(0, offset)
+    items = get_news_items(limit=safe_limit, ticker=ticker, offset=safe_offset)
     items = enrich_feed_with_llm(items)
-    return sanitize_for_json({"items": items, "count": len(items)})
+    payload: dict = {
+        "items": items,
+        "count": len(items),
+        "limit": safe_limit,
+        "offset": safe_offset,
+    }
+    if with_count:
+        payload["total"] = count_news_items(ticker=ticker)
+    return sanitize_for_json(payload)
 
 
 @router.get("/news")

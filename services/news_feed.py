@@ -259,11 +259,17 @@ async def build_stock_news_feed(ticker: str, limit: int = 10, refresh: bool = Fa
             seen_titles.add(item["title"])
             deduped.append(item)
 
-    # 종목 뉴스에도 url_hash 부여 후 LLM 분석 결과로 polarity 덮어쓰기
+    # 종목 뉴스에도 url_hash 부여 후 DB 영구 저장 (전체 뉴스 페이지에서 재사용)
     for item in deduped:
         url = (item.get("url") or "").strip()
         if url and not item.get("url_hash"):
             item["url_hash"] = _hash_url(url)
+    try:
+        from services.crud import upsert_news_items
+        upsert_news_items(deduped)
+    except Exception as e:
+        logger.warning("종목 뉴스 DB 저장 실패 (%s): %s", upper, e)
+
     result = enrich_feed_with_llm(deduped[:safe_limit])
     _stock_news_cache[upper] = (datetime.now(), result)
     return result

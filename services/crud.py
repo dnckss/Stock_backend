@@ -499,14 +499,34 @@ def upsert_news_items(items: list[dict]) -> None:
     client.table("news_items").upsert(rows, on_conflict="url_hash").execute()
 
 
-def get_news_items(limit: int = 50, ticker: str | None = None) -> list[dict]:
-    """뉴스 피드 항목을 최신순으로 조회한다."""
+def get_news_items(
+    limit: int = 50,
+    ticker: str | None = None,
+    offset: int = 0,
+) -> list[dict]:
+    """뉴스 피드 항목을 최신순(timestamp DESC)으로 조회. offset 으로 페이지네이션."""
     client = _get_client()
-    query = client.table("news_items").select("*").order("timestamp", desc=True).limit(limit)
+    safe_offset = max(0, offset)
+    safe_limit = max(1, limit)
+    query = client.table("news_items").select("*").order("timestamp", desc=True)
     if ticker:
         query = query.eq("ticker", ticker.upper())
-    resp = query.execute()
+    resp = query.range(safe_offset, safe_offset + safe_limit - 1).execute()
     return _sanitize(resp.data)
+
+
+def count_news_items(ticker: str | None = None) -> int:
+    """news_items 전체 행 수 (ticker 필터 가능). PostgREST count='exact' 사용."""
+    client = _get_client()
+    query = client.table("news_items").select("url_hash", count="exact").limit(1)
+    if ticker:
+        query = query.eq("ticker", ticker.upper())
+    try:
+        resp = query.execute()
+    except Exception as e:
+        logger.warning("news_items count 실패: %s", e)
+        return 0
+    return int(getattr(resp, "count", 0) or 0)
 
 
 def mark_news_item_has_article(url_hash: str) -> None:
