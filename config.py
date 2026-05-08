@@ -235,6 +235,15 @@ MACRO_FALLBACK = {
 SP500_WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 SP500_WIKI_HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
 
+# ---------------------------------------------------------------------------
+# Stock Universe (종목 검색용 universe 캐시)
+# ---------------------------------------------------------------------------
+# S&P 500 + strategy_history + analysis_results 합집합. 갱신은 잦지 않으므로 길게.
+STOCK_UNIVERSE_CACHE_TTL_SEC = int(os.getenv("STOCK_UNIVERSE_CACHE_TTL_SEC", "3600"))
+# DB 보조 universe (분석/추천 이력)에서 끌어올 최대 행 수.
+# distinct ticker 만 추출하므로 일반적으로 5000 행이면 충분.
+STOCK_UNIVERSE_DB_FETCH_LIMIT = int(os.getenv("STOCK_UNIVERSE_DB_FETCH_LIMIT", "5000"))
+
 NEWS_FALLBACK_TICKERS = [
     "AAPL", "MSFT", "NVDA", "GOOGL", "TSLA", "META", "AMZN", "AMD",
 ]

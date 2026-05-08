@@ -645,6 +645,46 @@ def get_strategy_history(limit: int = 20, ticker: str | None = None) -> list[dic
     return _sanitize(resp.data)
 
 
+def get_strategy_history_tickers(limit: int = 5000) -> set[str]:
+    """strategy_history 테이블의 distinct ticker 집합 (최신순 limit 행 기준).
+
+    종목 검색 universe 구성용 — 백테스트 등에 등장한 AI 추천 종목까지 검색되도록 한다.
+    """
+    client = _get_client()
+    resp = (
+        client.table("strategy_history")
+        .select("ticker")
+        .order("created_at", desc=True)
+        .limit(max(1, limit))
+        .execute()
+    )
+    return {
+        (row.get("ticker") or "").upper()
+        for row in (resp.data or [])
+        if row.get("ticker")
+    }
+
+
+def get_analysis_results_tickers(limit: int = 5000) -> set[str]:
+    """analysis_results 테이블의 distinct ticker 집합 (최신순 limit 행 기준).
+
+    종목 검색 universe 구성용 — 스캐너에 잡혔던 종목 전체를 포함시킨다.
+    """
+    client = _get_client()
+    resp = (
+        client.table("analysis_results")
+        .select("ticker")
+        .order("created_at", desc=True)
+        .limit(max(1, limit))
+        .execute()
+    )
+    return {
+        (row.get("ticker") or "").upper()
+        for row in (resp.data or [])
+        if row.get("ticker")
+    }
+
+
 # ---------------------------------------------------------------------------
 # S&P 500 Heatmap Snapshot
 # ---------------------------------------------------------------------------

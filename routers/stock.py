@@ -8,6 +8,7 @@ from services.news_feed import build_stock_news_feed
 from services.stock_detail import fetch_quote, fetch_chart, format_market_cap
 from services.stock_analysis import analyze_stock
 from services.stock_fundamentals import fetch_all_fundamentals, SECTION_FETCHERS
+from services.stock_universe import get_stock_universe
 from services.technicals import compute_technicals
 
 from config import FUNDAMENTALS_VALID_SECTIONS
@@ -17,6 +18,18 @@ router = APIRouter(prefix="/api", tags=["Stock"])
 
 
 # 구체적 경로를 먼저 등록 (FastAPI는 선언 순서로 매칭)
+
+@router.get("/stocks/universe")
+async def api_stocks_universe(refresh: int = 0):
+    """
+    종목 검색용 universe — S&P 500 구성종목 + strategy_history(AI 추천 이력) +
+    analysis_results(스캐너 이력) 합집합. 프런트는 이 응답을 클라이언트 사이드
+    필터로 사용해 검색에 누락되는 종목이 없게 한다.
+
+    - refresh=1: 캐시 무시 후 재빌드 (Wikipedia + Supabase 호출 수반)
+    """
+    return sanitize_for_json(await get_stock_universe(refresh=bool(refresh)))
+
 
 @router.get("/stock/{ticker}/chart")
 async def api_stock_chart(ticker: str, period: str = "day"):
