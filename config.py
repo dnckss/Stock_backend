@@ -18,9 +18,12 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
 
 # Strategist (Market Strategy) OpenAI model
 STRATEGIST_OPENAI_MODEL = os.getenv("STRATEGIST_OPENAI_MODEL", "gpt-5")
-STRATEGIST_OPENAI_TIMEOUT_SEC = int(os.getenv("STRATEGIST_OPENAI_TIMEOUT_SEC", "90"))
+STRATEGIST_OPENAI_TIMEOUT_SEC = int(os.getenv("STRATEGIST_OPENAI_TIMEOUT_SEC", "180"))
 # asyncio.wait_for는 클라이언트 timeout보다 약간 여유를 둔다.
-STRATEGIST_OPENAI_THREAD_BUFFER_SEC = int(os.getenv("STRATEGIST_OPENAI_THREAD_BUFFER_SEC", "2"))
+STRATEGIST_OPENAI_THREAD_BUFFER_SEC = int(os.getenv("STRATEGIST_OPENAI_THREAD_BUFFER_SEC", "5"))
+# GPT-5 / o1 / o3 등 reasoning 모델의 reasoning_effort 단계
+# minimal/low/medium/high — low 가 응답 속도와 품질 균형이 좋다.
+STRATEGIST_REASONING_EFFORT = os.getenv("STRATEGIST_REASONING_EFFORT", "low")
 # OpenAI 실패 시 fallback top_picks 개수 (스캔 rows 앞에서 N개)
 STRATEGIST_FALLBACK_TOP_PICKS_N = int(os.getenv("STRATEGIST_FALLBACK_TOP_PICKS_N", "2"))
 

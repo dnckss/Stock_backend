@@ -32,6 +32,7 @@ from config import (
     STRATEGIST_OPENAI_MODEL,
     STRATEGIST_OPENAI_THREAD_BUFFER_SEC,
     STRATEGIST_OPENAI_TIMEOUT_SEC,
+    STRATEGIST_REASONING_EFFORT,
     STRATEGIST_TEMPERATURE,
     STRATEGIST_TICKER_SECTOR_MAP,
     STRATEGIST_VIX_ELEVATED,
@@ -45,8 +46,16 @@ logger = logging.getLogger(__name__)
 _client = OpenAI(
     api_key=OPENAI_API_KEY,
     max_retries=2,
-    timeout=600,                # httpx 타임아웃 10분 (gpt-5 전문 분석 대기)
+    # httpx 레이어 timeout. STRATEGIST_OPENAI_TIMEOUT_SEC 가 단일 진실의 원천.
+    # 응답 지연이 누적되어 캐시 TTL(5분)을 넘기는 현상을 방지하기 위해 짧게 둔다.
+    timeout=STRATEGIST_OPENAI_TIMEOUT_SEC,
 ) if OPENAI_API_KEY else None
+
+
+def _is_reasoning_model(model: str | None) -> bool:
+    """reasoning_effort 를 지원하는 모델 식별 (gpt-5 / o1 / o3 계열)."""
+    name = (model or "").lower()
+    return "gpt-5" in name or "o1" in name or "o3" in name
 
 _KST = timezone(timedelta(hours=9))
 
@@ -729,14 +738,29 @@ async def _call_openai_strategy(
             ],
             "response_format": {"type": "json_object"},
         }
-        # gpt-5 등 temperature 미지원 모델 분기
-        model_lower = (STRATEGIST_OPENAI_MODEL or "").lower()
-        if "gpt-5" not in model_lower and "o1" not in model_lower and "o3" not in model_lower:
+        # reasoning 모델(gpt-5/o1/o3): reasoning_effort 로 응답 시간 단축, temperature 미지원.
+        # 일반 모델: temperature 지정.
+        if _is_reasoning_model(STRATEGIST_OPENAI_MODEL):
+            kwargs["reasoning_effort"] = STRATEGIST_REASONING_EFFORT
+        else:
             kwargs["temperature"] = STRATEGIST_TEMPERATURE
         return _client.chat.completions.create(**kwargs)
 
-    # 타임아웃 제한 없이 응답 완료까지 대기 (전문적 분석 품질 우선)
-    resp = await asyncio.to_thread(_create)
+    # 외부 timeout: httpx 레벨 timeout 이 동작 안 할 케이스(스레드 스택 등) 대비 이중 안전망.
+    outer_timeout = STRATEGIST_OPENAI_TIMEOUT_SEC + STRATEGIST_OPENAI_THREAD_BUFFER_SEC
+    try:
+        resp = await asyncio.wait_for(
+            asyncio.to_thread(_create), timeout=outer_timeout
+        )
+    except asyncio.TimeoutError as e:
+        elapsed = (datetime.now() - t_start).total_seconds()
+        logger.warning(
+            "전략가 OpenAI timeout: %.1fs 경과 (>%ds) — fallback 으로 전환",
+            elapsed, outer_timeout,
+        )
+        raise TimeoutError(
+            f"OpenAI 응답이 {outer_timeout}초 안에 완료되지 않음"
+        ) from e
     elapsed = (datetime.now() - t_start).total_seconds()
 
     # 운영 로깅: 토큰 사용량 + 응답 시간
