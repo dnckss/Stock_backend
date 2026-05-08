@@ -18,12 +18,15 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
 
 # Strategist (Market Strategy) OpenAI model
 STRATEGIST_OPENAI_MODEL = os.getenv("STRATEGIST_OPENAI_MODEL", "gpt-5")
-STRATEGIST_OPENAI_TIMEOUT_SEC = int(os.getenv("STRATEGIST_OPENAI_TIMEOUT_SEC", "180"))
+# 사용자 정책: 시간이 오래 걸려도 정상 응답을 받는 것이 우선 — timeout 을 충분히 길게 잡아
+# fallback 발동(에러 응답)을 피한다. 30분(1800초). httpx + asyncio.wait_for 동일 적용.
+STRATEGIST_OPENAI_TIMEOUT_SEC = int(os.getenv("STRATEGIST_OPENAI_TIMEOUT_SEC", "1800"))
 # asyncio.wait_for는 클라이언트 timeout보다 약간 여유를 둔다.
-STRATEGIST_OPENAI_THREAD_BUFFER_SEC = int(os.getenv("STRATEGIST_OPENAI_THREAD_BUFFER_SEC", "5"))
-# GPT-5 / o1 / o3 등 reasoning 모델의 reasoning_effort 단계
-# minimal/low/medium/high — low 가 응답 속도와 품질 균형이 좋다.
-STRATEGIST_REASONING_EFFORT = os.getenv("STRATEGIST_REASONING_EFFORT", "low")
+STRATEGIST_OPENAI_THREAD_BUFFER_SEC = int(os.getenv("STRATEGIST_OPENAI_THREAD_BUFFER_SEC", "30"))
+# GPT-5 / o1 / o3 등 reasoning 모델의 reasoning_effort 단계.
+# minimal/low/medium/high — medium 이 응답 안정성(JSON 형식·논리 일관성) 확보에 유리.
+# low 에서 JSON 깨짐·검증 실패가 누적되어 fallback 으로 떨어지던 문제를 막는다.
+STRATEGIST_REASONING_EFFORT = os.getenv("STRATEGIST_REASONING_EFFORT", "medium")
 # OpenAI 실패 시 fallback top_picks 개수 (스캔 rows 앞에서 N개)
 STRATEGIST_FALLBACK_TOP_PICKS_N = int(os.getenv("STRATEGIST_FALLBACK_TOP_PICKS_N", "2"))
 
@@ -66,7 +69,9 @@ FUNDAMENTALS_VALID_SECTIONS = frozenset({
 # - 최신 스캔 사이클 데이터 추출 창(window) 크기
 STRATEGIST_LATEST_SCAN_WINDOW_MINUTES = 90
 # - 전략 브리핑 OpenAI 응답 캐시 TTL (5분)
-STRATEGIST_CACHE_TTL_SEC = int(os.getenv("STRATEGIST_CACHE_TTL_SEC", "300"))
+# 응답이 길어질 수 있어 캐시 stampede 방지를 위해 TTL 을 길게 잡는다(30분).
+# 응답이 timeout 에 가까운 시간이 걸려도 다음 호출은 캐시 히트로 즉시 응답.
+STRATEGIST_CACHE_TTL_SEC = int(os.getenv("STRATEGIST_CACHE_TTL_SEC", "1800"))
 # - yfinance Ticker.info(섹터) 호출은 타임아웃 위험이 있어
 #   요청당 최대 호출 개수로 제한하고, 결과는 프로세스 내 캐싱한다.
 STRATEGIST_MAX_YFINANCE_SECTOR_CALLS_PER_REQUEST = 20
@@ -291,7 +296,16 @@ MAX_VIX = 80.0
 # ---------------------------------------------------------------------------
 # 포트폴리오·XAI 에이전트는 응답이 길어 reasoning 모델일수록 멈춘 것처럼 보임 → mini 기본
 PORTFOLIO_AGENT_MODEL = os.getenv("PORTFOLIO_AGENT_MODEL", "gpt-5-mini")
-PORTFOLIO_AGENT_TIMEOUT_SEC = int(os.getenv("PORTFOLIO_AGENT_TIMEOUT_SEC", "600"))
+# httpx 레벨 timeout. 600초는 5단계가 영원히 안 끝나는 체감을 만들어 240초로 단축.
+PORTFOLIO_AGENT_TIMEOUT_SEC = int(os.getenv("PORTFOLIO_AGENT_TIMEOUT_SEC", "240"))
+# reasoning 모델(gpt-5 계열) 의 reasoning_effort. minimal/low/medium/high.
+# 4단계 portfolio·5단계 xai 둘 다에 적용되어 첫 chunk 까지의 reasoning 대기 시간을 줄인다.
+PORTFOLIO_AGENT_REASONING_EFFORT = os.getenv("PORTFOLIO_AGENT_REASONING_EFFORT", "low")
+# stream 무응답(idle) 한계. chunk 사이 간격이 이 시간을 넘으면 강제 종료해
+# "5단계에서 멈춘 것처럼 보이는" 현상을 막는다.
+PORTFOLIO_AGENT_STREAM_INACTIVITY_SEC = int(
+    os.getenv("PORTFOLIO_AGENT_STREAM_INACTIVITY_SEC", "90")
+)
 
 # Monte Carlo 시뮬레이션
 MONTE_CARLO_SIMULATIONS = int(os.getenv("MONTE_CARLO_SIMULATIONS", "10000"))

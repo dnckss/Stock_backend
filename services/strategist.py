@@ -780,9 +780,20 @@ async def _call_openai_strategy(
     try:
         parsed = json.loads(content)
     except json.JSONDecodeError as e:
+        logger.warning(
+            "전략가 응답 JSON 파싱 실패: %s | 응답 앞 500자: %r", e, content[:500]
+        )
         raise ValueError(f"JSON 파싱 실패: {e}") from e
 
-    return _validate_strategy_json(parsed)
+    try:
+        return _validate_strategy_json(parsed)
+    except Exception as e:
+        logger.warning(
+            "전략가 응답 검증 실패: %s | 응답 키: %s",
+            e,
+            list(parsed.keys()) if isinstance(parsed, dict) else type(parsed).__name__,
+        )
+        raise
 
 
 # ---------------------------------------------------------------------------

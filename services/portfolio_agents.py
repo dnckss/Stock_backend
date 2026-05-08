@@ -27,6 +27,8 @@ from openai import OpenAI
 from config import (
     OPENAI_API_KEY,
     PORTFOLIO_AGENT_MODEL,
+    PORTFOLIO_AGENT_REASONING_EFFORT,
+    PORTFOLIO_AGENT_STREAM_INACTIVITY_SEC,
     PORTFOLIO_AGENT_TIMEOUT_SEC,
     XAI_AGENT_TEMPERATURE,
 )
@@ -52,16 +54,33 @@ def _sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {payload}\n\n"
 
 
-async def _aiter_sync(sync_iterable):
+async def _aiter_sync(sync_iterable, inactivity_timeout: float | None = None):
     """
     OpenAI SDK 의 sync stream 을 async iterator 로 감싼다.
     각 next() 호출을 to_thread 로 위임해 이벤트 루프 블록을 막는다 — 그렇지 않으면
     chunk 사이에 SSE keepalive·다른 task 가 못 돌아 클라이언트가 멈춘 것처럼 보인다.
+
+    Args:
+        inactivity_timeout: chunk 사이 idle 한계(초). reasoning 모델이 reasoning
+            토큰 단계에서 무한 정체될 때 강제로 stream 을 끊어 5단계 멈춤을 방지.
     """
     sentinel = object()
     iterator = iter(sync_iterable)
     while True:
-        chunk = await asyncio.to_thread(next, iterator, sentinel)
+        try:
+            if inactivity_timeout and inactivity_timeout > 0:
+                chunk = await asyncio.wait_for(
+                    asyncio.to_thread(next, iterator, sentinel),
+                    timeout=inactivity_timeout,
+                )
+            else:
+                chunk = await asyncio.to_thread(next, iterator, sentinel)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "OpenAI stream chunk inactivity %.0fs 초과 — 강제 종료(부분 응답으로 진행)",
+                inactivity_timeout or 0,
+            )
+            return
         if chunk is sentinel:
             return
         yield chunk
@@ -643,7 +662,10 @@ async def _run_portfolio_agent(
             ],
             "stream": True,
         }
-        if not _model_omits_temperature(model):
+        if _model_omits_temperature(model):
+            # gpt-5/o1/o3 reasoning 모델 — reasoning_effort 로 첫 chunk 까지의 대기 단축
+            kwargs["reasoning_effort"] = PORTFOLIO_AGENT_REASONING_EFFORT
+        else:
             kwargs["temperature"] = 0.3
         return _client.chat.completions.create(**kwargs)
 
@@ -661,7 +683,9 @@ async def _run_portfolio_agent(
     json_buffer = ""
 
     try:
-        async for chunk in _aiter_sync(stream):
+        async for chunk in _aiter_sync(
+            stream, inactivity_timeout=PORTFOLIO_AGENT_STREAM_INACTIVITY_SEC
+        ):
             delta = chunk.choices[0].delta if chunk.choices else None
             if not delta or not delta.content:
                 continue
@@ -828,7 +852,10 @@ async def _run_xai_agent(
             ],
             "stream": True,
         }
-        if not _model_omits_temperature(model):
+        if _model_omits_temperature(model):
+            # 5단계는 입력 페이로드가 가장 커 reasoning 토큰 부담이 큼 — effort 적용 필수
+            kwargs["reasoning_effort"] = PORTFOLIO_AGENT_REASONING_EFFORT
+        else:
             kwargs["temperature"] = XAI_AGENT_TEMPERATURE
         return _client.chat.completions.create(**kwargs)
 
@@ -845,7 +872,9 @@ async def _run_xai_agent(
     json_buffer = ""
 
     try:
-        async for chunk in _aiter_sync(stream):
+        async for chunk in _aiter_sync(
+            stream, inactivity_timeout=PORTFOLIO_AGENT_STREAM_INACTIVITY_SEC
+        ):
             delta = chunk.choices[0].delta if chunk.choices else None
             if not delta or not delta.content:
                 continue
