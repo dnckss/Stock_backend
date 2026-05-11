@@ -1,7 +1,32 @@
 import asyncio
 import logging
+import os
+import sys
 import warnings
 from contextlib import asynccontextmanager
+
+# Render/PaaS 디버깅을 위해 최상단에서 logging 을 stdout 으로 강제 + line-buffered.
+# 이렇게 안 하면 import 단계의 에러/로그가 buffering 으로 안 보여 "silent hang" 처럼 보인다.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    stream=sys.stdout,
+    force=True,
+)
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except AttributeError:
+    pass
+
+logger = logging.getLogger(__name__)
+logger.info("api.py import 시작 (Python %s)", sys.version.split()[0])
+logger.info(
+    "env: PORT=%s SUPABASE_URL=%s OPENAI_API_KEY=%s",
+    os.environ.get("PORT", "(none)"),
+    "set" if os.environ.get("SUPABASE_URL") else "MISSING",
+    "set" if os.environ.get("OPENAI_API_KEY") else "MISSING",
+)
 
 warnings.filterwarnings("ignore", category=FutureWarning, module="yfinance")
 warnings.filterwarnings("ignore", message=".*Timestamp.utcnow.*")
@@ -15,6 +40,8 @@ except ImportError:
 from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+
+logger.info("FastAPI/표준 import 완료, services import 시작")
 
 from services.crud import init_db, sanitize_for_json, get_latest_scan_records
 from services.engine import (
@@ -35,7 +62,7 @@ from routers import news
 from routers import chat
 from routers import backtest
 
-logger = logging.getLogger(__name__)
+logger.info("services/routers import 완료")
 
 
 async def _seed_initial_caches():
@@ -79,7 +106,12 @@ async def _seed_initial_caches():
 async def lifespan(app: FastAPI):
     # PaaS(Render 등) port scan timeout 회피: yield 까지 도달 시간을 최소화한다.
     # 무거운 시드 작업(Supabase 페이지네이션, yfinance, FinBERT 로딩)은 모두 background task.
-    init_db()
+    logger.info("lifespan 진입 — init_db 호출")
+    try:
+        init_db()
+    except Exception as e:
+        logger.exception("init_db 실패 (계속 진행, 백그라운드에서 재시도): %s", e)
+    logger.info("init_db 완료, 백그라운드 task 등록 중")
 
     seed_task = asyncio.create_task(_seed_initial_caches())
     scan_task = asyncio.create_task(run_analysis_loop())
@@ -89,7 +121,9 @@ async def lifespan(app: FastAPI):
     news_task = asyncio.create_task(run_news_feed_loop())
     backtest_warmup_task = asyncio.create_task(run_backtest_warmup_loop())
     price_backfill_task = asyncio.create_task(run_price_backfill_loop())
+    logger.info("lifespan yield — uvicorn 이 PORT listen 시작")
     yield
+    logger.info("lifespan shutdown — task 정리")
     seed_task.cancel()
     scan_task.cancel()
     macro_task.cancel()
@@ -132,12 +166,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 if __name__ == "__main__":
-    import os
     import uvicorn
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
     # Render/Heroku 등 PaaS 는 PORT 환경변수로 포트 주입 — 없으면 로컬 기본 8000.
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))
+    port = int(os.environ.get("PORT", "8000"))
+    logger.info("uvicorn.run 호출 — host=0.0.0.0 port=%d", port)
+    uvicorn.run(app, host="0.0.0.0", port=port)
