@@ -38,14 +38,12 @@ from routers import backtest
 logger = logging.getLogger(__name__)
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    init_db()
-
-    # DB에서 마지막 스캔 데이터를 로드하여 수집 완료 전까지 프론트 공백 방지
+async def _seed_initial_caches():
+    """초기 캐시 시드 — 모두 background. yield 를 막지 않도록 lifespan 외부에서 await."""
+    # DB에서 마지막 스캔 데이터 로드 (페이지네이션 다중 호출, blocking → to_thread)
     try:
         from config import REPORT_TOP_N
-        cached_records = get_latest_scan_records()
+        cached_records = await asyncio.to_thread(get_latest_scan_records)
         if cached_records:
             latest_cache["top_picks"] = cached_records[:REPORT_TOP_N]
             latest_cache["radar"] = cached_records[REPORT_TOP_N:]
@@ -54,8 +52,9 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("기동 시 DB 캐시 로드 실패: %s", e, exc_info=True)
 
+    # 매크로 (yfinance 동기 호출)
     try:
-        macro = fetch_macro_indicators()
+        macro = await asyncio.to_thread(fetch_macro_indicators)
         latest_cache["macro"] = macro
         gauge_data = get_market_gauge(macro)
         latest_cache["market_gauge"] = gauge_data["market_gauge"]
@@ -64,17 +63,25 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("기동 시 매크로 수집 실패: %s", e, exc_info=True)
 
+    # 뉴스 + FinBERT (가장 무거움 — 모델 첫 로드 시 수백 MB 다운로드)
     try:
         from config import NEWS_FALLBACK_TICKERS
         from services.news_feed import prefetch_news_articles
         feed = await build_news_feed(NEWS_FALLBACK_TICKERS)
         latest_cache["news_feed"] = feed
         latest_cache["updated_at"] = datetime.now().isoformat()
-        # 기동 시 본문 프리페치 시작
         asyncio.create_task(prefetch_news_articles(feed))
     except Exception as e:
         logger.warning("기동 시 뉴스 수집 실패: %s", e, exc_info=True)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # PaaS(Render 등) port scan timeout 회피: yield 까지 도달 시간을 최소화한다.
+    # 무거운 시드 작업(Supabase 페이지네이션, yfinance, FinBERT 로딩)은 모두 background task.
+    init_db()
+
+    seed_task = asyncio.create_task(_seed_initial_caches())
     scan_task = asyncio.create_task(run_analysis_loop())
     macro_task = asyncio.create_task(run_macro_loop())
     price_tick_task = asyncio.create_task(run_price_tick_loop())
@@ -83,6 +90,7 @@ async def lifespan(app: FastAPI):
     backtest_warmup_task = asyncio.create_task(run_backtest_warmup_loop())
     price_backfill_task = asyncio.create_task(run_price_backfill_loop())
     yield
+    seed_task.cancel()
     scan_task.cancel()
     macro_task.cancel()
     price_tick_task.cancel()
