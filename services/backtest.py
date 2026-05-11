@@ -192,7 +192,13 @@ def _exit_price_after(
     entry_dt: datetime,
     horizon: int,
 ) -> tuple[float | None, date | None]:
-    """entry_dt 이후 horizon번째 거래일의 종가. 미도달 시 (None, None)."""
+    """entry_dt 이후 horizon번째 거래일의 종가.
+
+    horizon 거래일치 데이터가 그대로 있으면 그 종가를 사용한다.
+    그렇지 않더라도 weekday 기준 거래일이 horizon 이상 경과했으면(예: 만료일이
+    오늘이지만 미국장 종가가 yfinance 에 아직 미반영) 가장 최근 가용 종가로
+    청산 처리해 "이미 끝났어야 하는데 진행중"으로 보이는 현상을 막는다.
+    """
     if ticker not in close_df.columns or close_df.empty:
         return None, None
     series = close_df[ticker].dropna()
@@ -209,13 +215,25 @@ def _exit_price_after(
     # entry_day 초과 거래일만
     mask = idx.date > entry_day
     valid = series[mask]
-    if len(valid) < horizon:
+    if len(valid) >= horizon:
+        exit_ts = valid.index[horizon - 1]
+        exit_price = float(valid.iloc[horizon - 1])
+        if not math.isfinite(exit_price):
+            return None, None
+        return exit_price, exit_ts.date()
+
+    # 데이터 부족이지만 weekday 기준 거래일이 horizon 이상 지났으면 closed 로 승격.
+    if len(valid) == 0:
         return None, None
-    exit_ts = valid.index[horizon - 1]
-    exit_price = float(valid.iloc[horizon - 1])
-    if not math.isfinite(exit_price):
-        return None, None
-    return exit_price, exit_ts.date()
+    today = pd.Timestamp.now().date()
+    # entry_day 다음 영업일부터 today 까지의 weekday 카운트
+    weekday_count = len(pd.bdate_range(entry_day, today)) - 1
+    if weekday_count >= horizon:
+        exit_ts = valid.index[-1]
+        exit_price = float(valid.iloc[-1])
+        if math.isfinite(exit_price):
+            return exit_price, exit_ts.date()
+    return None, None
 
 
 # ---------------------------------------------------------------------------
