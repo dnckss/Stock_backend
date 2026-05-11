@@ -16,6 +16,12 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
 
+# FinBERT 대안 — transformers/torch 미설치(저메모리 환경) 시 OpenAI 로 감성 분류.
+FINBERT_OPENAI_MODEL = os.getenv("FINBERT_OPENAI_MODEL", "gpt-4o-mini")
+FINBERT_OPENAI_TIMEOUT_SEC = int(os.getenv("FINBERT_OPENAI_TIMEOUT_SEC", "30"))
+# 한 번의 OpenAI 호출에 묶을 헤드라인 최대 개수
+FINBERT_OPENAI_BATCH_SIZE = int(os.getenv("FINBERT_OPENAI_BATCH_SIZE", "30"))
+
 # Strategist (Market Strategy) OpenAI model
 STRATEGIST_OPENAI_MODEL = os.getenv("STRATEGIST_OPENAI_MODEL", "gpt-5")
 # 사용자 정책: 시간이 오래 걸려도 정상 응답을 받는 것이 우선 — timeout 을 충분히 길게 잡아
