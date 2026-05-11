@@ -306,7 +306,7 @@ PORTFOLIO_AGENT_MODEL = os.getenv("PORTFOLIO_AGENT_MODEL", "gpt-5-mini")
 PORTFOLIO_AGENT_TIMEOUT_SEC = int(os.getenv("PORTFOLIO_AGENT_TIMEOUT_SEC", "240"))
 # reasoning 모델(gpt-5 계열) 의 reasoning_effort. minimal/low/medium/high.
 # 4단계 portfolio·5단계 xai 둘 다에 적용되어 첫 chunk 까지의 reasoning 대기 시간을 줄인다.
-PORTFOLIO_AGENT_REASONING_EFFORT = os.getenv("PORTFOLIO_AGENT_REASONING_EFFORT", "low")
+PORTFOLIO_AGENT_REASONING_EFFORT = os.getenv("PORTFOLIO_AGENT_REASONING_EFFORT", "medium")
 # stream 무응답(idle) 한계. chunk 사이 간격이 이 시간을 넘으면 강제 종료해
 # "5단계에서 멈춘 것처럼 보이는" 현상을 막는다.
 PORTFOLIO_AGENT_STREAM_INACTIVITY_SEC = int(

@@ -742,8 +742,11 @@ async def _run_portfolio_agent(
 
     try:
         parsed = json.loads(json_text)
-    except json.JSONDecodeError:
-        logger.warning("포트폴리오 JSON 파싱 실패: %s", json_text[:500])
+    except json.JSONDecodeError as e:
+        logger.warning(
+            "포트폴리오 JSON 파싱 실패: %s | full_content len=%d | json_text 앞 800자: %r",
+            e, len(full_content), json_text[:800],
+        )
         parsed = {"allocations": [], "portfolio_thesis": "AI 응답 파싱 실패", "warnings": ["응답 파싱 오류"]}
 
     elapsed = time.time() - start
@@ -924,8 +927,11 @@ async def _run_xai_agent(
 
     try:
         parsed = json.loads(json_text)
-    except json.JSONDecodeError:
-        logger.warning("XAI JSON 파싱 실패: %s", json_text[:500])
+    except json.JSONDecodeError as e:
+        logger.warning(
+            "XAI JSON 파싱 실패: %s | full_content len=%d | json_text 앞 800자: %r",
+            e, len(full_content), json_text[:800],
+        )
         parsed = {"portfolio_narrative": "AI 설명 생성 실패", "action_items": []}
 
     elapsed = time.time() - start
