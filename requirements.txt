@@ -3,6 +3,8 @@ fastapi==0.135.1
 uvicorn[standard]==0.41.0
 pydantic==2.12.5
 python-dotenv==1.2.2
+# FastAPI UploadFile/Form (routers/chat.py 의 파일 업로드 endpoint 에 필수)
+python-multipart==0.0.20
 
 # HTTP / crawling
 httpx==0.28.1
