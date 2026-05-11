@@ -1,3 +1,6 @@
+--index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://pypi.org/simple
+
 # Web framework
 fastapi==0.135.1
 uvicorn[standard]==0.41.0
@@ -23,4 +26,4 @@ supabase==2.28.3
 
 # FinBERT (감성 분석)
 transformers==5.3.0
-torch==2.10.0
+torch==2.10.0+cpu
