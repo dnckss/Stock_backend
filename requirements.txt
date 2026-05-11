@@ -21,8 +21,8 @@ yfinance==1.2.0
 openai==2.26.0
 supabase==2.28.3
 
-# FinBERT (감성 분석) — Render Free Plan(512MB) 메모리 한계로 제외.
-# services/finbert.py 가 transformers 미설치를 감지하면 neutral 폴백 반환.
-# 유료 플랜 또는 메모리 여유 환경에서는 아래 두 줄 주석 해제하면 자동 복구.
-# transformers==5.3.0
-# torch==2.10.0
+# FinBERT (감성 분석) — Hugging Face Spaces(16GB RAM) 환경에서 정상 동작.
+# Render Free 등 저메모리 환경에서는 두 줄 주석 처리하면 services/finbert.py 가
+# 자동으로 neutral 폴백으로 전환된다.
+transformers==5.3.0
+torch==2.10.0
