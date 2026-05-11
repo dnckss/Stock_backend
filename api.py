@@ -124,10 +124,12 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 if __name__ == "__main__":
+    import os
     import uvicorn
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Render/Heroku 등 PaaS 는 PORT 환경변수로 포트 주입 — 없으면 로컬 기본 8000.
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))
