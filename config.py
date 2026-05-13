@@ -88,7 +88,11 @@ SCAN_TRADING_DAYS = 5  # 등락률 계산 기준 거래일 수
 REPORT_TOP_N = 2
 # 분석 사이클 안정성: scan_stocks 결과가 이 개수 미만이면 yfinance 부분 차단/장시간 누적 오류로
 # 간주하고 직전 스냅샷(메모리→DB)을 유지한다. 새 1~2개 결과로 top_picks/radar 를 덮어쓰지 않는다.
-MIN_TOP_PICKS_FRESH = int(os.getenv("MIN_TOP_PICKS_FRESH", "5"))
+#
+# 기준: S&P 500 503개 × MIN_VOLUME 통과율 ~84% ≈ 420개. 그 절반(~250) 이상이면 정상으로 간주.
+# yfinance 가 장 오픈 직후 등 시간대에 부분 차단해 결과가 100~200으로 떨어지면 stale 유지로
+# 사용자 화면이 갑자기 줄지 않게 한다.
+MIN_TOP_PICKS_FRESH = int(os.getenv("MIN_TOP_PICKS_FRESH", "250"))
 
 # Cycle
 SCAN_INTERVAL_SEC = 3600
@@ -123,8 +127,8 @@ CORS_ALLOW_ORIGINS: list[str] = (
 )
 
 # yfinance 분봉 시세 (스캔과 별도 — top/radar 종목만 자주 갱신)
-PRICE_TICK_INTERVAL_SEC = int(os.getenv("PRICE_TICK_INTERVAL_SEC", "60"))
-PRICE_TICK_MAX_SYMBOLS = int(os.getenv("PRICE_TICK_MAX_SYMBOLS", "120"))
+PRICE_TICK_INTERVAL_SEC = int(os.getenv("PRICE_TICK_INTERVAL_SEC", "30"))
+PRICE_TICK_MAX_SYMBOLS = int(os.getenv("PRICE_TICK_MAX_SYMBOLS", "250"))
 # 1m은 호출 부담이 크므로 기본 5m (장중 마지막 봉 기준으로 체감 갱신)
 PRICE_INTRADAY_INTERVAL = os.getenv("PRICE_INTRADAY_INTERVAL", "5m")
 PRICE_DOWNLOAD_BATCH_SIZE = int(os.getenv("PRICE_DOWNLOAD_BATCH_SIZE", "50"))
