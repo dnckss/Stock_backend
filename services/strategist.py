@@ -23,12 +23,15 @@ from config import (
     STRATEGIST_ECON_MAX_UPCOMING,
     STRATEGIST_ECON_MIN_IMPORTANCE,
     STRATEGIST_ECON_UPCOMING_HOURS,
+    STRATEGIST_ENTRY_DEVIATION_THRESHOLD,
+    STRATEGIST_ENTRY_NORMALIZED_BAND_PCT,
     STRATEGIST_FALLBACK_TOP_PICKS_N,
     STRATEGIST_GAUGE_FEAR,
     STRATEGIST_HIGH_RISK_ECON_KEYWORDS,
     STRATEGIST_MAX_YFINANCE_SECTOR_CALLS_PER_REQUEST,
     STRATEGIST_NEWS_PER_TICKER_MAX,
     STRATEGIST_NEWS_TOP_N,
+    STRATEGIST_NORMALIZED_STOP_LOSS_PCT,
     STRATEGIST_OPENAI_MODEL,
     STRATEGIST_OPENAI_THREAD_BUFFER_SEC,
     STRATEGIST_OPENAI_TIMEOUT_SEC,
@@ -877,6 +880,65 @@ def _recommendations_signature(recs: list[dict[str, Any]], market_regime: str | 
     return hashlib.sha1("||".join(parts).encode("utf-8")).hexdigest()
 
 
+def _entry_zone_mid(zone: dict[str, Any] | None) -> float | None:
+    """entry_zone 의 대표 가격 (lo/hi mid) — 둘 중 하나만 있으면 그 값 사용."""
+    if not isinstance(zone, dict):
+        return None
+    lo = _safe_float(zone.get("low"))
+    hi = _safe_float(zone.get("high"))
+    if lo is not None and hi is not None and lo > 0 and hi > 0:
+        return (lo + hi) / 2.0
+    if lo is not None and lo > 0:
+        return lo
+    if hi is not None and hi > 0:
+        return hi
+    return None
+
+
+def _normalize_recommendation_prices(recommendations: list[dict[str, Any]]) -> int:
+    """추천의 entry_zone/stop_loss/targets 가 current_price 와 크게 어긋나면 보정.
+
+    LLM 이 시세를 잘못 알고(예: 분할 전 옛날 가격) 환각한 entry_zone 이
+    DB 에 그대로 저장되어 백테스트·UI 가 잘못된 진입가를 보여주는 문제를 방지.
+    current_price 가 없으면(보강 실패) skip 하고 LLM 응답 그대로 둔다.
+    보정된 추천 수를 반환.
+    """
+    fixed = 0
+    for rec in recommendations or []:
+        cp = _safe_float(rec.get("current_price"))
+        if cp is None or cp <= 0:
+            continue
+        zone_mid = _entry_zone_mid(rec.get("entry_zone"))
+        if zone_mid is None:
+            continue
+        deviation = abs(zone_mid - cp) / cp
+        if deviation <= STRATEGIST_ENTRY_DEVIATION_THRESHOLD:
+            continue
+        # current_price 기반으로 entry_zone 재계산 + 손절/타겟 무효화
+        band = cp * STRATEGIST_ENTRY_NORMALIZED_BAND_PCT
+        new_lo = round(cp - band, 2)
+        new_hi = round(cp + band, 2)
+        ticker = (rec.get("ticker") or "").upper()
+        logger.warning(
+            "추천 진입가 환각 보정 (%s): current_price=%.2f, llm_entry_mid=%.2f "
+            "(편차 %.0f%%) → entry_zone=[%.2f, %.2f]",
+            ticker, cp, zone_mid, deviation * 100, new_lo, new_hi,
+        )
+        rec["entry_zone"] = {"low": new_lo, "high": new_hi}
+        direction = (rec.get("direction") or "").upper()
+        sl_pct = STRATEGIST_NORMALIZED_STOP_LOSS_PCT
+        if direction == "SELL":
+            rec["stop_loss"] = round(cp * (1 + sl_pct), 2)
+        else:
+            rec["stop_loss"] = round(cp * (1 - sl_pct), 2)
+        rec["stop_loss_pct"] = -round(sl_pct * 100, 2)
+        # LLM 환각 가격 기반의 targets / risk_reward_ratio 는 신뢰 불가 → 비움
+        rec["targets"] = []
+        rec["risk_reward_ratio"] = None
+        fixed += 1
+    return fixed
+
+
 async def _persist_recommendations_if_changed(response: dict[str, Any]) -> None:
     """이전 저장분과 내용이 다를 때만 strategy_history 에 insert."""
     global _last_saved_rec_signature
@@ -887,6 +949,10 @@ async def _persist_recommendations_if_changed(response: dict[str, Any]) -> None:
     valid = [r for r in recs if (r.get("ticker") or "").strip() and r.get("direction")]
     if not valid:
         return
+    # LLM 환각 진입가 보정 (response 내 객체를 직접 수정 — UI/캐시도 보정값 사용)
+    fixed = _normalize_recommendation_prices(valid)
+    if fixed:
+        logger.info("추천 진입가 환각 보정: %d/%d 건 정정 후 저장", fixed, len(valid))
     market_regime = response.get("market_regime")
     signature = _recommendations_signature(valid, market_regime)
     if signature == _last_saved_rec_signature:

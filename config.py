@@ -87,6 +87,15 @@ STRATEGIST_YFINANCE_SECTOR_TIMEOUT_SEC = 8
 # - OpenAI temperature
 STRATEGIST_TEMPERATURE = 0.3
 
+# - 추천 가격 정규화 (LLM 환각 방지)
+#   entry_zone mid 가 current_price 와 ±N 이상 벌어지면 종가 기반으로 자동 보정.
+#   예: TXN 시세 289 인데 LLM 이 entry_zone 144 로 환각하는 케이스 차단.
+STRATEGIST_ENTRY_DEVIATION_THRESHOLD = float(os.getenv("STRATEGIST_ENTRY_DEVIATION_THRESHOLD", "0.15"))
+#   보정 시 entry_zone 폭 — current_price 의 ±0.5%
+STRATEGIST_ENTRY_NORMALIZED_BAND_PCT = float(os.getenv("STRATEGIST_ENTRY_NORMALIZED_BAND_PCT", "0.005"))
+#   보정 시 기본 손절폭 — current_price 의 3% (BUY 는 -3%, SELL 은 +3%)
+STRATEGIST_NORMALIZED_STOP_LOSS_PCT = float(os.getenv("STRATEGIST_NORMALIZED_STOP_LOSS_PCT", "0.03"))
+
 # - 섹터 정렬 시 fallback divergence 값
 STRATEGIST_DIVERGENCE_FALLBACK = 0.0
 

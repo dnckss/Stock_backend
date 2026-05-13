@@ -594,7 +594,13 @@ def _run_signals_backtest_sync(
 # ---------------------------------------------------------------------------
 
 def _enrich_strategy_entry(row: dict) -> dict:
-    """entry = (entry_low + entry_high) / 2 를 'price' 필드로 주입."""
+    """entry_zone mid 를 'price' fallback 으로 주입.
+
+    이 값은 LLM 이 응답한 entry_zone 으로, 시세를 잘못 알고 환각한 케이스에서
+    실제 가격과 크게 어긋날 수 있다. 실제 entry_price 는 close_df 확보 후
+    `_resolve_actual_entry_prices` 가 추천 시점 종가로 덮어쓴다 — 종가 조회
+    실패 시 여기서 채운 fallback 이 그대로 사용된다.
+    """
     lo = _safe_float(row.get("entry_low"))
     hi = _safe_float(row.get("entry_high"))
     if lo is not None and hi is not None and lo > 0 and hi > 0:
@@ -606,6 +612,90 @@ def _enrich_strategy_entry(row: dict) -> dict:
     else:
         row["price"] = None
     return row
+
+
+def _actual_entry_close(
+    close_df: pd.DataFrame,
+    ticker: str,
+    entry_dt: datetime,
+) -> float | None:
+    """추천 시점 기준 entry_price 로 사용할 실제 종가.
+
+    우선순위:
+      1) entry_day 또는 직전 거래일 종가 (`series.asof`)
+      2) entry_day 이후 첫 거래일 종가 (장 시작 전 추천 케이스)
+    둘 다 실패하면 None 반환 → 호출부가 entry_zone fallback 유지.
+    """
+    if ticker not in close_df.columns or close_df.empty:
+        return None
+    series = close_df[ticker].dropna()
+    if series.empty:
+        return None
+    idx = series.index
+    if not isinstance(idx, pd.DatetimeIndex):
+        try:
+            idx = pd.DatetimeIndex(idx)
+            series = pd.Series(series.values, index=idx)
+        except Exception:
+            return None
+    entry_day = pd.Timestamp(entry_dt.date())
+    val = series.asof(entry_day)
+    if val is not None and not pd.isna(val):
+        try:
+            f = float(val)
+        except (TypeError, ValueError):
+            f = None
+        if f is not None and math.isfinite(f) and f > 0:
+            return f
+    after = series[series.index > entry_day]
+    if not after.empty:
+        try:
+            f = float(after.iloc[0])
+        except (TypeError, ValueError):
+            f = None
+        if f is not None and math.isfinite(f) and f > 0:
+            return f
+    return None
+
+
+def _resolve_actual_entry_prices(
+    records: list[dict],
+    close_df: pd.DataFrame,
+) -> list[dict]:
+    """records 의 'price'(entry_zone fallback) 를 실제 종가로 덮어쓴다.
+
+    LLM 환각으로 entry_zone 이 시세와 동떨어진 케이스(예: TXN 5/6 entry_mid=144
+    vs 실제 종가 289)를 정확히 평가하기 위함. 종가 조회 실패 시 fallback 유지.
+    """
+    if close_df is None or close_df.empty or not records:
+        return records
+    overridden = 0
+    large_dev = 0
+    for r in records:
+        ticker = (r.get("ticker") or "").upper().strip()
+        entry_dt = _parse_iso(r.get("created_at"))
+        if not ticker or entry_dt is None:
+            continue
+        actual = _actual_entry_close(close_df, ticker, entry_dt)
+        if actual is None:
+            continue
+        prev = _safe_float(r.get("price"))
+        r["price"] = actual
+        overridden += 1
+        if prev is not None and prev > 0:
+            dev = abs(actual - prev) / prev
+            if dev > 0.15:
+                large_dev += 1
+                logger.warning(
+                    "entry_price 큰 보정 (%s @ %s): entry_zone_mid=%.2f → 실제 종가 %.2f (편차 %.0f%%)",
+                    ticker, entry_dt.date().isoformat(), prev, actual, dev * 100,
+                )
+    if overridden:
+        logger.info(
+            "백테스트 entry_price 보정: %d/%d 레코드를 실제 종가로 교체 (큰 편차: %d)",
+            overridden, len(records), large_dev,
+        )
+    return records
 
 
 def _run_strategist_backtest_sync(
@@ -624,6 +714,7 @@ def _run_strategist_backtest_sync(
     records = [_enrich_strategy_entry(dict(r)) for r in raw_records]
 
     close_df = _download_prices_for(records)
+    records = _resolve_actual_entry_prices(records, close_df)
     results_by_horizon: dict[str, Any] = {}
 
     for h in horizons:
@@ -997,6 +1088,9 @@ def _run_live_sync(lookback_days: int, horizons: list[int]) -> dict[str, Any]:
     merged_for_prices.extend(strategy_records)
     close_df = _download_prices_for(merged_for_prices)
 
+    # strategist 추천은 LLM 환각된 entry_zone 대신 실제 종가로 entry 보정
+    strategy_records = _resolve_actual_entry_prices(strategy_records, close_df)
+
     signals_live = _compute_live_positions(
         signals_records, close_df, horizons,
         direction_key="signal", price_key="price",
@@ -1334,6 +1428,9 @@ def _run_trade_history_sync(
         }
 
     close_df = _download_prices_for(records)
+    if source == "strategist":
+        # LLM 환각된 entry_zone 대신 실제 종가로 entry 보정
+        records = _resolve_actual_entry_prices(records, close_df)
 
     # group_by 윈도우 단위로 그룹핑.
     # day → 그날 들어온 모든 BUY/SELL 시그널이 한 trade(포트폴리오)
