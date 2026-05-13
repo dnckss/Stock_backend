@@ -143,11 +143,20 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan, title="Woochan AI Quant Terminal API")
 
+from config import CORS_ALLOW_ORIGINS
+
+# allow_credentials 는 화이트리스트일 때만 True (브라우저 정책상 "*" 와 동시 사용 불가)
+_cors_allow_credentials = CORS_ALLOW_ORIGINS != ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ALLOW_ORIGINS,
+    allow_credentials=_cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+logger.info(
+    "CORS 설정: origins=%s, allow_credentials=%s",
+    CORS_ALLOW_ORIGINS, _cors_allow_credentials,
 )
 
 app.include_router(market.router)

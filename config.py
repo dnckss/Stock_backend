@@ -108,6 +108,19 @@ WS_IDLE_TIMEOUT_SEC = int(os.getenv("WS_IDLE_TIMEOUT_SEC", "300"))
 
 # 섹터 트래커 응답 캐시 TTL (yfinance 재호출 부담 분산)
 SECTOR_TRACKER_CACHE_TTL_SEC = int(os.getenv("SECTOR_TRACKER_CACHE_TTL_SEC", "600"))
+# 주간 수익률 임계 (모멘텀 라벨링)
+SECTOR_TRACKER_STRONG_MOVE_PCT = float(os.getenv("SECTOR_TRACKER_STRONG_MOVE_PCT", "0.02"))
+SECTOR_TRACKER_NORMAL_MOVE_PCT = float(os.getenv("SECTOR_TRACKER_NORMAL_MOVE_PCT", "0.005"))
+# 로테이션 판정 시 그룹간 최소 우위 격차
+SECTOR_TRACKER_ROTATION_MIN_EDGE_PCT = float(os.getenv("SECTOR_TRACKER_ROTATION_MIN_EDGE_PCT", "0.005"))
+
+# CORS — env 미설정 시 "*"(개발 모드). 콤마 구분.
+#   ex) CORS_ALLOW_ORIGINS=https://app.example.com,https://staging.example.com
+_cors_raw = os.getenv("CORS_ALLOW_ORIGINS", "*").strip()
+CORS_ALLOW_ORIGINS: list[str] = (
+    ["*"] if _cors_raw == "*"
+    else [o.strip() for o in _cors_raw.split(",") if o.strip()]
+)
 
 # yfinance 분봉 시세 (스캔과 별도 — top/radar 종목만 자주 갱신)
 PRICE_TICK_INTERVAL_SEC = int(os.getenv("PRICE_TICK_INTERVAL_SEC", "60"))

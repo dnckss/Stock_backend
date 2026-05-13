@@ -10,6 +10,12 @@ from typing import Any
 
 import yfinance as yf
 
+from config import (
+    SECTOR_TRACKER_NORMAL_MOVE_PCT,
+    SECTOR_TRACKER_ROTATION_MIN_EDGE_PCT,
+    SECTOR_TRACKER_STRONG_MOVE_PCT,
+)
+
 logger = logging.getLogger(__name__)
 
 # SPDR 섹터 ETF 매핑
@@ -80,13 +86,13 @@ def fetch_sector_performance() -> list[dict[str, Any]]:
             # 모멘텀 판단
             momentum = "neutral"
             if weekly_return is not None:
-                if weekly_return > 0.02:
+                if weekly_return > SECTOR_TRACKER_STRONG_MOVE_PCT:
                     momentum = "strong_up"
-                elif weekly_return > 0.005:
+                elif weekly_return > SECTOR_TRACKER_NORMAL_MOVE_PCT:
                     momentum = "up"
-                elif weekly_return < -0.02:
+                elif weekly_return < -SECTOR_TRACKER_STRONG_MOVE_PCT:
                     momentum = "strong_down"
-                elif weekly_return < -0.005:
+                elif weekly_return < -SECTOR_TRACKER_NORMAL_MOVE_PCT:
                     momentum = "down"
 
             results.append({
@@ -124,11 +130,12 @@ def determine_sector_rotation(sector_perf: list[dict[str, Any]]) -> str:
     scores = {"growth": growth_avg, "defensive": defensive_avg, "cyclical": cyclical_avg}
     top = max(scores, key=scores.get)
 
-    if top == "growth" and growth_avg > defensive_avg + 0.005:
+    edge = SECTOR_TRACKER_ROTATION_MIN_EDGE_PCT
+    if top == "growth" and growth_avg > defensive_avg + edge:
         return "growth"
-    elif top == "defensive" and defensive_avg > growth_avg + 0.005:
+    elif top == "defensive" and defensive_avg > growth_avg + edge:
         return "defensive"
-    elif top == "cyclical" and cyclical_avg > growth_avg + 0.005:
+    elif top == "cyclical" and cyclical_avg > growth_avg + edge:
         return "cyclical"
     return "mixed"
 

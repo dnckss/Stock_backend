@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install runtime + test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Run pytest
+        env:
+          # 외부 시스템과 통신하지 않는 단위 테스트 — env 검증이 strict 면 import 단계에서 실패하므로 해제.
+          STRICT_ENV: "false"
+          SUPABASE_URL: "https://example.supabase.co"
+          SUPABASE_KEY: "ci-test"
+          OPENAI_API_KEY: "ci-test"
+        run: pytest -ra
