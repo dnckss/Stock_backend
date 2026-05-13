@@ -61,6 +61,8 @@ from routers import strategy
 from routers import news
 from routers import chat
 from routers import backtest
+from routers import risk
+from routers import sectors
 
 logger.info("services/routers import 완료")
 
@@ -106,7 +108,10 @@ async def _seed_initial_caches():
 async def lifespan(app: FastAPI):
     # PaaS(Render 등) port scan timeout 회피: yield 까지 도달 시간을 최소화한다.
     # 무거운 시드 작업(Supabase 페이지네이션, yfinance, FinBERT 로딩)은 모두 background task.
-    logger.info("lifespan 진입 — init_db 호출")
+    logger.info("lifespan 진입 — env 검증 + init_db 호출")
+    from config import validate_required_env
+    # 필수 env 누락 시 fail-fast (STRICT_ENV=false 면 WARNING 으로 격하)
+    validate_required_env()
     try:
         init_db()
     except Exception as e:
@@ -151,17 +156,51 @@ app.include_router(strategy.router)
 app.include_router(news.router)
 app.include_router(chat.router)
 app.include_router(backtest.router)
+app.include_router(risk.router)
+app.include_router(sectors.router)
 
 
 @app.websocket("/ws/market")
 async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
+    """마켓 브로드캐스트 채널.
+
+    운영 안정화:
+      - 연결 상한 초과 시 1013 으로 거절(manager 내부)
+      - WS_IDLE_TIMEOUT_SEC 동안 클라이언트 메시지 0개 → idle 종료
+      - WS_HEARTBEAT_INTERVAL_SEC 마다 ping 송신해 dead connection 조기 탐지
+    """
+    from config import WS_HEARTBEAT_INTERVAL_SEC, WS_IDLE_TIMEOUT_SEC
+
+    accepted = await manager.connect(websocket)
+    if not accepted:
+        return
     try:
         if latest_cache.get("updated_at"):
             await websocket.send_json({"type": "MARKET_UPDATE", **sanitize_for_json(latest_cache)})
+
+        last_seen = asyncio.get_event_loop().time()
         while True:
-            await websocket.receive_text()
+            now = asyncio.get_event_loop().time()
+            if now - last_seen > WS_IDLE_TIMEOUT_SEC:
+                logger.info("WebSocket idle 타임아웃 (>%ds) — 연결 종료", WS_IDLE_TIMEOUT_SEC)
+                await websocket.close(code=1001, reason="idle timeout")
+                break
+            try:
+                # heartbeat 주기 안에 클라 메시지 도착하면 last_seen 갱신
+                await asyncio.wait_for(
+                    websocket.receive_text(), timeout=WS_HEARTBEAT_INTERVAL_SEC,
+                )
+                last_seen = asyncio.get_event_loop().time()
+            except asyncio.TimeoutError:
+                # heartbeat ping 송신 (실패하면 연결 끊긴 것)
+                try:
+                    await websocket.send_json({"type": "PING", "ts": datetime.now().isoformat()})
+                except Exception:
+                    logger.debug("WebSocket ping 송신 실패 — 연결 종료 처리")
+                    break
     except WebSocketDisconnect:
+        pass
+    finally:
         manager.disconnect(websocket)
 
 

@@ -95,8 +95,8 @@ def _parse_agent_result(event: str, agent_name: str) -> dict[str, Any] | None:
         parsed = json.loads(payload.strip())
         if parsed.get("agent") == agent_name:
             return parsed.get("data") or {}
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("agent_result SSE 파싱 실패 (agent=%s): %s", agent_name, e)
     return None
 
 

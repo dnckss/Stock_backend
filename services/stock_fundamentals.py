@@ -253,8 +253,8 @@ def _build_indicators(
     if ex_date_raw:
         try:
             ex_dividend_date = pd.Timestamp(ex_date_raw, unit="s").strftime("%Y-%m-%d")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ex_dividend_date 변환 실패 (raw=%r): %s", ex_date_raw, e)
 
     return {
         "valuation": {

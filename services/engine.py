@@ -5,6 +5,8 @@ from datetime import datetime
 from config import (
     ECON_CALENDAR_INTERVAL_SEC,
     ERROR_RETRY_SEC,
+    LOOP_BACKOFF_MAX_SEC,
+    LOOP_FAILURE_ALERT_THRESHOLD,
     MACRO_INTERVAL_SEC,
     MIN_TOP_PICKS_FRESH,
     NEWS_FALLBACK_TICKERS,
@@ -34,6 +36,29 @@ from services.price_store import backfill_recent
 from services.websocket import manager, latest_cache
 
 logger = logging.getLogger(__name__)
+
+
+def _backoff_delay(failures: int) -> int:
+    """연속 실패 회수에 따른 대기 시간 — 지수 백오프 + 상한.
+
+    failures=1 → ERROR_RETRY_SEC, =2 → 2x, =3 → 4x ... 상한은 LOOP_BACKOFF_MAX_SEC.
+    """
+    if failures <= 0:
+        return ERROR_RETRY_SEC
+    delay = ERROR_RETRY_SEC * (2 ** (failures - 1))
+    return min(delay, LOOP_BACKOFF_MAX_SEC)
+
+
+def _log_loop_failure(loop_name: str, failures: int, exc: BaseException) -> None:
+    """루프 실패를 일관 형식으로 로깅. 누적 임계 초과 시 ERROR 로 격상."""
+    if failures >= LOOP_FAILURE_ALERT_THRESHOLD:
+        logger.error(
+            "%s 루프 누적 실패 %d회 (>=%d) — 점검 필요: %s",
+            loop_name, failures, LOOP_FAILURE_ALERT_THRESHOLD, exc,
+            exc_info=True,
+        )
+    else:
+        logger.exception("%s 루프 에러 (연속 %d회): %s", loop_name, failures, exc)
 
 
 async def _preserve_or_restore_snapshot(reason: str) -> None:
@@ -80,6 +105,7 @@ async def run_analysis_loop():
     """
     # get_all_tickers/scan_stocks 등은 동기 + 네트워크/CPU 작업이어서 이벤트 루프를 막을 수 있다.
     tickers = await asyncio.to_thread(get_all_tickers)
+    failures = 0
 
     while True:
         try:
@@ -130,11 +156,15 @@ async def run_analysis_loop():
 
             elapsed = datetime.now() - start
             logger.info("스캔 완료 (소요: %s)", elapsed)
+            failures = 0  # 성공 시 카운터 리셋
             await asyncio.sleep(SCAN_INTERVAL_SEC)
 
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            logger.exception("엔진 에러: %s", e)
-            await asyncio.sleep(ERROR_RETRY_SEC)
+            failures += 1
+            _log_loop_failure("스캔", failures, e)
+            await asyncio.sleep(_backoff_delay(failures))
 
 
 def _tag_macro_flash(prev: dict | None, cur: dict) -> dict:
@@ -166,6 +196,7 @@ async def run_macro_loop():
     yfinance fast_info로 글로벌 지표를 수집하여 latest_cache에 반영하고 WebSocket으로 브로드캐스트한다.
     값이 변경된 지표에는 flash=True를 부여하여 프런트에서 강조 효과를 적용할 수 있도록 한다.
     """
+    failures = 0
     while True:
         try:
             prev_macro = latest_cache.get("macro")
@@ -181,10 +212,14 @@ async def run_macro_loop():
             await manager.broadcast({"type": "MARKET_UPDATE", **sanitize_for_json(latest_cache)})
 
             logger.info("매크로 지표 %s개 업데이트 완료", count)
+            failures = 0
+            await asyncio.sleep(MACRO_INTERVAL_SEC)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            logger.exception("매크로 에러: %s", e)
-
-        await asyncio.sleep(MACRO_INTERVAL_SEC)
+            failures += 1
+            _log_loop_failure("매크로", failures, e)
+            await asyncio.sleep(_backoff_delay(failures))
 
 
 def _tickers_for_price_refresh() -> list[str]:
@@ -213,6 +248,7 @@ async def run_price_tick_loop():
         logger.info("분봉 시세 틱 비활성화 (PRICE_TICK_INTERVAL_SEC<=0)")
         return
 
+    failures = 0
     while True:
         try:
             tickers = _tickers_for_price_refresh()
@@ -228,31 +264,39 @@ async def run_price_tick_loop():
                 latest_cache["updated_at"] = datetime.now().isoformat()
                 await manager.broadcast({"type": "MARKET_UPDATE", **sanitize_for_json(latest_cache)})
                 logger.info("분봉 시세 갱신 완료 (%s/%s 심볼)", len(live), len(tickers))
+            failures = 0
+            await asyncio.sleep(PRICE_TICK_INTERVAL_SEC)
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.exception("가격 틱 루프 에러: %s", e)
-
-        await asyncio.sleep(PRICE_TICK_INTERVAL_SEC)
+            failures += 1
+            _log_loop_failure("가격 틱", failures, e)
+            await asyncio.sleep(_backoff_delay(failures))
 
 
 async def run_econ_calendar_loop():
     """30분 주기 경제 캘린더 크롤링 루프."""
     from services.economic_calendar import fetch_economic_calendar
 
+    failures = 0
     while True:
         try:
             result = await fetch_economic_calendar(refresh=True)
             count = len(result.get("items") or [])
             logger.info("경제 캘린더 갱신 완료: %d건", count)
+            failures = 0
+            await asyncio.sleep(ECON_CALENDAR_INTERVAL_SEC)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            logger.exception("경제 캘린더 루프 에러: %s", e)
-
-        await asyncio.sleep(ECON_CALENDAR_INTERVAL_SEC)
+            failures += 1
+            _log_loop_failure("경제 캘린더", failures, e)
+            await asyncio.sleep(_backoff_delay(failures))
 
 
 async def run_news_feed_loop():
     """10분 주기 뉴스 피드 갱신 루프."""
+    failures = 0
     while True:
         try:
             # top_picks/radar에서 티커 추출, 없으면 fallback 티커 사용
@@ -273,10 +317,14 @@ async def run_news_feed_loop():
             # 백그라운드 본문 프리페치 — 사용자 클릭 시 즉시 응답 가능하도록
             from services.news_feed import prefetch_news_articles
             asyncio.create_task(prefetch_news_articles(feed))
+            failures = 0
+            await asyncio.sleep(NEWS_FEED_INTERVAL_SEC)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            logger.exception("뉴스 피드 루프 에러: %s", e)
-
-        await asyncio.sleep(NEWS_FEED_INTERVAL_SEC)
+            failures += 1
+            _log_loop_failure("뉴스 피드", failures, e)
+            await asyncio.sleep(_backoff_delay(failures))
 
 
 async def run_price_backfill_loop():
@@ -291,6 +339,7 @@ async def run_price_backfill_loop():
 
     await asyncio.sleep(max(0, PRICE_BACKFILL_INITIAL_DELAY_SEC))
 
+    failures = 0
     while True:
         try:
             result = await asyncio.to_thread(backfill_recent)
@@ -298,12 +347,14 @@ async def run_price_backfill_loop():
                 "가격 backfill 완료: tickers=%s rows=%s elapsed=%.1fs",
                 result.get("tickers"), result.get("rows_written"), result.get("elapsed_sec", 0),
             )
+            failures = 0
+            await asyncio.sleep(PRICE_BACKFILL_INTERVAL_SEC)
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.exception("가격 backfill 루프 에러: %s", e)
-
-        await asyncio.sleep(PRICE_BACKFILL_INTERVAL_SEC)
+            failures += 1
+            _log_loop_failure("가격 backfill", failures, e)
+            await asyncio.sleep(_backoff_delay(failures))
 
 
 async def run_backtest_warmup_loop():
@@ -333,6 +384,7 @@ async def run_backtest_warmup_loop():
     from services.backtest import run_summary, run_trade_history
 
     step_delay = max(0, BACKTEST_WARMUP_STEP_DELAY_SEC)
+    failures = 0
 
     while True:
         start = datetime.now()
@@ -358,9 +410,11 @@ async def run_backtest_warmup_loop():
 
             elapsed = (datetime.now() - start).total_seconds()
             logger.info("백테스트 자동 워밍 종료 (%.1fs)", elapsed)
+            failures = 0
+            await asyncio.sleep(BACKTEST_AUTO_WARMUP_INTERVAL_SEC)
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.exception("백테스트 자동 워밍 루프 에러: %s", e)
-
-        await asyncio.sleep(BACKTEST_AUTO_WARMUP_INTERVAL_SEC)
+            failures += 1
+            _log_loop_failure("백테스트 워밍", failures, e)
+            await asyncio.sleep(_backoff_delay(failures))

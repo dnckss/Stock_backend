@@ -46,7 +46,7 @@ async def api_news_detail(url: str, refresh: int = 0, analyze: int = 1):
     """
     if not url or not url.strip():
         raise HTTPException(status_code=400, detail="url 쿼리 파라미터가 필요합니다.")
-    return await get_news_article(url, refresh=bool(refresh), analyze=bool(analyze))
+    return sanitize_for_json(await get_news_article(url, refresh=bool(refresh), analyze=bool(analyze)))
 
 
 @router.get("/economic-calendar")
@@ -56,7 +56,7 @@ async def api_economic_calendar(refresh: int = 0):
     DB에 저장된 모든 일정을 시간순으로 반환한다.
     - refresh=1: 캐시 무시 후 재수집
     """
-    return await fetch_economic_calendar(refresh=bool(refresh))
+    return sanitize_for_json(await fetch_economic_calendar(refresh=bool(refresh)))
 
 
 @router.get("/economic-calendar/detail")

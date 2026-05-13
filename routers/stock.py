@@ -64,31 +64,53 @@ async def api_stock_quote(ticker: str):
     })
 
 
+def _coerce_partial(value, label: str, fallback, errors: list[str], ticker: str):
+    """gather(return_exceptions=True) 결과 1건을 안전하게 분리. 실패 시 fallback + errors 누적."""
+    if isinstance(value, Exception):
+        logger.warning("[%s] %s 수집 실패 (부분 응답으로 진행): %s", ticker, label, value)
+        errors.append(label)
+        return fallback
+    return value
+
+
 @router.get("/stock/{ticker}/analysis")
 async def api_stock_analysis(ticker: str):
     """
     종목별 AI 심층 분석.
     뉴스·기술적 지표·가격 변동을 종합하여 원인 분석, 반등 가능성, 전략을 제공한다.
+    일부 소스 실패 시에도 partial response 로 가능한 데이터 + errors 필드 반환.
     """
     upper = ticker.upper()
 
-    # 병렬: 시세 + 기술적 지표 + 뉴스
+    # 병렬: 시세 + 기술적 지표 + 뉴스 (개별 실패 허용)
     quote_task = asyncio.to_thread(fetch_quote, upper)
     tech_task = asyncio.to_thread(compute_technicals, upper)
     news_task = build_stock_news_feed(upper, limit=10, refresh=True)
 
-    try:
-        quote, technicals, stock_news = await asyncio.gather(quote_task, tech_task, news_task)
-    except Exception as e:
-        logger.exception("종목 분석 데이터 수집 실패 (%s): %s", upper, e)
-        raise HTTPException(status_code=500, detail=f"데이터 수집 실패: {e}")
+    raw_quote, raw_tech, raw_news = await asyncio.gather(
+        quote_task, tech_task, news_task, return_exceptions=True
+    )
+    errors: list[str] = []
+    quote = _coerce_partial(raw_quote, "quote", {}, errors, upper)
+    technicals = _coerce_partial(raw_tech, "technicals", {}, errors, upper)
+    stock_news = _coerce_partial(raw_news, "news", [], errors, upper)
+
+    # 핵심 데이터(시세 + 기술지표)가 둘 다 비면 분석 의미 없음 — 404
+    if not quote and not technicals:
+        raise HTTPException(status_code=404, detail=f"{upper} 분석 데이터 없음")
 
     result = await analyze_stock(upper, quote, technicals, stock_news)
 
     if result.get("error"):
-        return sanitize_for_json({"ticker": upper, "analysis": None, "error": result["error"]})
+        return sanitize_for_json({
+            "ticker": upper, "analysis": None,
+            "error": result["error"], "errors": errors or None,
+        })
 
-    return sanitize_for_json({"ticker": upper, "analysis": result})
+    return sanitize_for_json({
+        "ticker": upper, "analysis": result,
+        "errors": errors or None,
+    })
 
 
 @router.get("/stock/{ticker}/fundamentals/{section}")
@@ -136,20 +158,32 @@ async def api_stock_detail(
     """
     upper = ticker.upper()
 
-    # 병렬 실행: 시세 + 차트 + 뉴스
+    # 병렬 실행: 시세 + 차트 + 뉴스 (개별 실패 허용)
     quote_task = asyncio.to_thread(fetch_quote, upper)
     chart_task = asyncio.to_thread(fetch_chart, upper, chart_period)
     news_task = build_stock_news_feed(upper, limit=news_limit, refresh=bool(news_refresh))
 
-    try:
-        quote, chart, stock_news = await asyncio.gather(quote_task, chart_task, news_task)
-    except Exception as e:
-        logger.exception("종목 상세 조회 실패 (%s): %s", upper, e)
-        raise HTTPException(status_code=500, detail=f"데이터 조회 실패: {e}")
+    raw_quote, raw_chart, raw_news = await asyncio.gather(
+        quote_task, chart_task, news_task, return_exceptions=True
+    )
+    errors: list[str] = []
+    quote = _coerce_partial(raw_quote, "quote", {}, errors, upper)
+    chart = _coerce_partial(raw_chart, "chart", [], errors, upper)
+    stock_news = _coerce_partial(raw_news, "news", [], errors, upper)
 
-    # AI 분석 (동기 DB 호출)
-    latest = get_latest_report(upper)
-    history = get_history(upper, days=30)
+    # AI 분석 (동기 DB 호출) — DB 실패도 부분 허용
+    try:
+        latest = get_latest_report(upper)
+    except Exception as e:
+        logger.warning("[%s] latest_report 조회 실패: %s", upper, e)
+        latest = None
+        errors.append("latest_report")
+    try:
+        history = get_history(upper, days=30)
+    except Exception as e:
+        logger.warning("[%s] history 조회 실패: %s", upper, e)
+        history = []
+        errors.append("history")
 
     if not quote.get("price") and not chart and not stock_news:
         raise HTTPException(status_code=404, detail=f"{upper} 데이터 없음")
@@ -170,4 +204,5 @@ async def api_stock_detail(
             "latest_report": latest,
             "history": history,
         },
+        "errors": errors or None,
     })

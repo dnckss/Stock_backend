@@ -332,8 +332,8 @@ async def prefetch_news_articles(feed: list[dict[str, Any]]) -> None:
                 upsert_news_article(row)
                 try:
                     mark_news_item_has_article(entry["url_hash"])
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("mark_news_item_has_article 실패: %s", e)
             except Exception as e:
                 logger.debug("프리페치 실패 (%s): %s", entry["url"][:60], e)
 

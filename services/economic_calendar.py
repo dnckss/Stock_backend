@@ -451,8 +451,8 @@ async def fetch_economic_calendar(
                     "cache_ttl_sec": ECON_CALENDAR_TTL_SEC,
                     "error": None,
                 }
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("경제 캘린더 DB fallback 조회 실패: %s", e)
 
         return {
             "source": "myfxbook",

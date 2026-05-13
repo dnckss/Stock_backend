@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from typing import Any
 
 from services.article_crawler import fetch_and_extract
@@ -9,6 +10,8 @@ from config import NEWS_ARTICLE_CACHE_TTL_SEC
 from services.finbert import analyze_text
 from services.news_sentiment import normalize_to_polarity, polarity_to_ko
 from services.news_analysis import analyze_news_korean
+
+logger = logging.getLogger(__name__)
 
 
 def _hash_url(url: str) -> str:
@@ -57,8 +60,11 @@ async def get_news_article(url: str, refresh: bool = False, analyze: bool = True
                     )
                     cached["analysis"] = analysis
                     upsert_news_article(cached)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(
+                        "캐시 기사 LLM 보강 실패 (%s): %s",
+                        (cached.get("url") or "")[:80], e,
+                    )
             return sanitize_for_json({**cached, "cache_hit": True, "cache_ttl_sec": NEWS_ARTICLE_CACHE_TTL_SEC})
 
     crawled = await fetch_and_extract(clean_url)

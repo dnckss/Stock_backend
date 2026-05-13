@@ -570,8 +570,10 @@ async def _resolve_sector_yfinance(ticker: str) -> str:
         sector = await asyncio.wait_for(asyncio.to_thread(_fetch), timeout=STRATEGIST_YFINANCE_SECTOR_TIMEOUT_SEC)
         if isinstance(sector, str) and sector.strip():
             return sector.strip()
-    except (asyncio.TimeoutError, Exception):
-        pass
+    except asyncio.TimeoutError:
+        logger.debug("yfinance sector 조회 timeout (%s)", ticker)
+    except Exception as e:
+        logger.debug("yfinance sector 조회 실패 (%s): %s", ticker, e)
     return "Unknown"
 
 

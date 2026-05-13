@@ -1,7 +1,10 @@
 from dotenv import load_dotenv
+import logging
 import os
 
 load_dotenv()
+
+_cfg_logger = logging.getLogger(__name__)
 
 
 def _bool_env(name: str, default: str = "false") -> bool:
@@ -15,6 +18,48 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
+
+
+def validate_required_env(strict: bool | None = None) -> list[str]:
+    """필수 환경변수 검증.
+
+    REQUIRED (없으면 RuntimeError):
+      - SUPABASE_URL, SUPABASE_KEY  : DB 자체가 동작 불가
+    OPTIONAL (없으면 WARNING + 일부 기능 비활성):
+      - OPENAI_API_KEY              : LLM/감성 폴백 비활성
+
+    strict=False 면 critical 도 RuntimeError 대신 WARNING 으로 격하 (테스트/로컬용).
+    기본값은 STRICT_ENV 환경변수 (default: true).
+    """
+    if strict is None:
+        strict = _bool_env("STRICT_ENV", default="true")
+
+    critical_missing: list[str] = []
+    optional_missing: list[str] = []
+
+    if not SUPABASE_URL:
+        critical_missing.append("SUPABASE_URL")
+    if not SUPABASE_KEY:
+        critical_missing.append("SUPABASE_KEY")
+    if not OPENAI_API_KEY:
+        optional_missing.append("OPENAI_API_KEY")
+
+    if optional_missing:
+        _cfg_logger.warning(
+            "선택 환경변수 누락 — 관련 기능 비활성: %s",
+            ", ".join(optional_missing),
+        )
+
+    if critical_missing:
+        msg = (
+            "필수 환경변수 누락: " + ", ".join(critical_missing)
+            + " — .env 또는 배포 환경에 설정 필요"
+        )
+        if strict:
+            raise RuntimeError(msg)
+        _cfg_logger.error(msg + " (STRICT_ENV=false 라 부팅 계속, 첫 DB 호출에서 실패)")
+
+    return critical_missing
 
 # FinBERT 대안 — transformers/torch 미설치(저메모리 환경) 시 OpenAI 로 감성 분류.
 FINBERT_OPENAI_MODEL = os.getenv("FINBERT_OPENAI_MODEL", "gpt-4o-mini")
@@ -48,6 +93,21 @@ MIN_TOP_PICKS_FRESH = int(os.getenv("MIN_TOP_PICKS_FRESH", "5"))
 # Cycle
 SCAN_INTERVAL_SEC = 3600
 ERROR_RETRY_SEC = 60
+
+# 백그라운드 루프 자동 복구
+#   1회 실패 시 ERROR_RETRY_SEC * 2^(failures-1) 만큼 대기 (단, BACKOFF_MAX_SEC 상한).
+#   FAILURE_ALERT_THRESHOLD 회 연속 실패하면 ERROR 로그로 알림.
+LOOP_BACKOFF_MAX_SEC = int(os.getenv("LOOP_BACKOFF_MAX_SEC", "1800"))   # 30분 상한
+LOOP_FAILURE_ALERT_THRESHOLD = int(os.getenv("LOOP_FAILURE_ALERT_THRESHOLD", "5"))
+
+# WebSocket 운영
+WS_MAX_CONNECTIONS = int(os.getenv("WS_MAX_CONNECTIONS", "200"))
+WS_HEARTBEAT_INTERVAL_SEC = int(os.getenv("WS_HEARTBEAT_INTERVAL_SEC", "30"))
+# 클라이언트가 이 시간 안에 어떤 메시지(텍스트/pong/ping)도 보내지 않으면 idle 로 판단해 종료
+WS_IDLE_TIMEOUT_SEC = int(os.getenv("WS_IDLE_TIMEOUT_SEC", "300"))
+
+# 섹터 트래커 응답 캐시 TTL (yfinance 재호출 부담 분산)
+SECTOR_TRACKER_CACHE_TTL_SEC = int(os.getenv("SECTOR_TRACKER_CACHE_TTL_SEC", "600"))
 
 # yfinance 분봉 시세 (스캔과 별도 — top/radar 종목만 자주 갱신)
 PRICE_TICK_INTERVAL_SEC = int(os.getenv("PRICE_TICK_INTERVAL_SEC", "60"))

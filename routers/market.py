@@ -13,8 +13,9 @@ async def api_latest():
 
 @router.get("/all-records")
 async def api_all_records(limit: int = 100):
-    """DB에 저장된 전체 분석 기록 조회"""
-    return get_all_records(limit)
+    """DB에 저장된 전체 분석 기록 조회 — nested NaN/Inf 까지 안전 직렬화."""
+    safe_limit = max(1, min(int(limit) if limit else 100, 1000))
+    return sanitize_for_json(get_all_records(safe_limit))
 
 
 @router.get("/heatmap/sp500")
@@ -28,4 +29,4 @@ async def api_heatmap_sp500():
 async def api_markets_global(refresh: int = 0):
     """글로벌 마켓 오버뷰 — 국제 지수·원자재·환율 (5분 캐시)."""
     from services.global_markets import fetch_global_markets
-    return await fetch_global_markets(refresh=bool(refresh))
+    return sanitize_for_json(await fetch_global_markets(refresh=bool(refresh)))
