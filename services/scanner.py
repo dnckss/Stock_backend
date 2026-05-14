@@ -153,18 +153,30 @@ def ensure_sp500_coverage(candidates: list[dict]) -> list[dict]:
 _DOWNLOAD_BATCH_SIZE = 100
 
 
-def _compute_return(series: pd.Series) -> float | None:
-    """Close 시리즈에서 최근 N거래일 수익률을 계산한다. 유효하지 않으면 None."""
-    valid = series.dropna()
-    if len(valid) < 2:
+def _compute_return(ohlc: pd.DataFrame) -> float | None:
+    """Google Finance "지난 N일" 정의로 등락률 계산.
+
+    base = (today - (N-1) trading days) 의 OPEN
+    last = today CLOSE
+    SCAN_TRADING_DAYS=5 → 5 포인트 윈도우의 첫 점 OPEN vs 마지막 점 CLOSE.
+
+    OPEN 이 base 인 이유: Google Finance "지난 N일" 표기가 거래 시작가 기준이라
+    어닝 직후 점프(DDOG 5/7 +31%) 같은 경우에도 외부 사이트 수치와 일치한다.
+    """
+    if "Close" not in ohlc.columns or "Open" not in ohlc.columns:
         return None
-    window = min(SCAN_TRADING_DAYS + 1, len(valid))
-    tail = valid.iloc[-window:]
-    first, last = float(tail.iloc[0]), float(tail.iloc[-1])
-    if first == 0:
+    close = ohlc["Close"].dropna()
+    open_ = ohlc["Open"].dropna()
+    if close.empty or open_.empty:
         return None
-    ret = (last - first) / first
-    return ret if math.isfinite(ret) else None
+    n = min(SCAN_TRADING_DAYS, len(close), len(open_))
+    if n < 1:
+        return None
+    last_close = float(close.iloc[-1])
+    first_open = float(open_.iloc[-n])
+    if first_open == 0 or not math.isfinite(first_open) or not math.isfinite(last_close):
+        return None
+    return (last_close - first_open) / first_open
 
 
 def scan_stocks(tickers: list[str]) -> list[dict]:
@@ -218,7 +230,7 @@ def scan_stocks(tickers: list[str]) -> list[dict]:
                 # 등락률을 못 구해도(데이터 1개 등) 가격·일봉이 있으면 candidates 에 포함.
                 # 그래야 ensure_sp500_coverage 가 placeholder 로 채우지 않고, 등락률 컬럼만
                 # 비어 있는 정상 row 가 화면에 나타난다(가격·거래량·일봉은 모두 표시됨).
-                ret = _compute_return(close_series)
+                ret = _compute_return(ticker_data)
 
                 daily_bars: list[dict] = []
                 for idx, row in ticker_data.iterrows():
@@ -243,7 +255,10 @@ def scan_stocks(tickers: list[str]) -> list[dict]:
                     except Exception:
                         continue
 
-                keep = SCAN_TRADING_DAYS + 1
+                # _compute_return 와 동일한 5 포인트 윈도우로 통일.
+                # merge_intraday_into_candidates 가 daily[0].close 를 base 로 사용하므로
+                # 같은 첫 종가가 잡히도록 keep == SCAN_TRADING_DAYS.
+                keep = SCAN_TRADING_DAYS
                 trimmed_bars = daily_bars[-keep:] if len(daily_bars) > keep else daily_bars
 
                 candidates.append({
@@ -470,13 +485,17 @@ def merge_intraday_into_candidates(candidates: list[dict], live: dict[str, dict]
                 c["liquidity_ok"] = u["volume"] >= MIN_VOLUME
         c["quote_as_of"] = u["as_of"]
 
-        # 기존 5일봉의 첫 종가를 기준으로, 최신 분봉 price에 맞춰 return 갱신
+        # Google "지난 5일" 정의에 맞춘 base = 5포인트 윈도우 첫 점의 OPEN.
+        # 최신 분봉 price 와 결합해 등락률을 재계산한다.
         try:
             daily = c.get("daily") or []
             if daily and isinstance(daily, list):
-                base_close = daily[0].get("close")
-                if base_close is not None:
-                    base = float(base_close)
+                base_open = daily[0].get("open")
+                if base_open is None:
+                    # OPEN 이 누락된 경우 close 로 fallback (편차 미미한 종목엔 충분).
+                    base_open = daily[0].get("close")
+                if base_open is not None:
+                    base = float(base_open)
                     now_px = float(u["price"])
                     if math.isfinite(base) and math.isfinite(now_px) and base != 0:
                         c["return"] = round((now_px - base) / base, 6)
