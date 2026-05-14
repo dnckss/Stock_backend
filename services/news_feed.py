@@ -117,19 +117,24 @@ async def build_news_feed(tickers: list[str]) -> list[dict[str, Any]]:
 
     raw_items: list[dict[str, Any]] = []
 
-    for ticker in tickers[:15]:
+    # ticker 별 yf.Ticker.get_news 를 병렬 호출 (직렬 루프 시 N×수초 누적).
+    target_tickers = tickers[:15]
+
+    def _fetch_one(tk: str) -> tuple[str, list]:
         try:
-            t = yf.Ticker(ticker)
-            news_items = t.get_news(count=5)
+            return tk, yf.Ticker(tk).get_news(count=5) or []
         except Exception as e:
-            print(f"뉴스 수집 실패 ({ticker}): {e}")
-            continue
+            logger.debug("뉴스 수집 실패 (%s): %s", tk, e)
+            return tk, []
 
-        if not news_items:
+    fetch_tasks = [asyncio.to_thread(_fetch_one, tk) for tk in target_tickers]
+    fetched = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+    for entry in fetched:
+        if isinstance(entry, Exception):
             continue
-
+        tk, news_items = entry
         for raw_item in news_items:
-            parsed = _parse_news_item(raw_item, ticker)
+            parsed = _parse_news_item(raw_item, tk)
             if parsed:
                 raw_items.append(parsed)
 
@@ -139,7 +144,8 @@ async def build_news_feed(tickers: list[str]) -> list[dict[str, Any]]:
         return _cache
 
     titles = [item["title"] for item in raw_items]
-    finbert_results = analyze_batch(titles)
+    # FinBERT 추론(CPU 바운드 또는 OpenAI 호출) 도 비차단으로 — 대량일 때 효과 큼.
+    finbert_results = await asyncio.to_thread(analyze_batch, titles)
 
     feed: list[dict[str, Any]] = []
     for item, fb in zip(raw_items, finbert_results):
@@ -221,9 +227,12 @@ async def build_stock_news_feed(ticker: str, limit: int = 10, refresh: bool = Fa
 
     fetch_count = max(safe_limit, 10)
     try:
-        t = yf.Ticker(upper)
-        news_items = t.get_news(count=fetch_count)
-    except Exception:
+        # 동기 yfinance 호출 — 이벤트 루프 비차단을 위해 to_thread.
+        news_items = await asyncio.to_thread(
+            lambda: yf.Ticker(upper).get_news(count=fetch_count),
+        )
+    except Exception as e:
+        logger.debug("종목별 뉴스 수집 실패 (%s): %s", upper, e)
         _stock_news_cache[upper] = (datetime.now(), [])
         return []
 
@@ -238,7 +247,7 @@ async def build_stock_news_feed(ticker: str, limit: int = 10, refresh: bool = Fa
         return []
 
     titles = [item["title"] for item in raw_items]
-    finbert_results = analyze_batch(titles)
+    finbert_results = await asyncio.to_thread(analyze_batch, titles)
 
     feed: list[dict[str, Any]] = []
     for item, fb in zip(raw_items, finbert_results):

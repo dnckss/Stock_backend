@@ -395,6 +395,7 @@ async def run_backtest_warmup_loop():
         BACKTEST_AUTO_WARMUP_ENABLED,
         BACKTEST_AUTO_WARMUP_INITIAL_DELAY_SEC,
         BACKTEST_AUTO_WARMUP_INTERVAL_SEC,
+        BACKTEST_WARMUP_LOOKBACK_DAYS,
         BACKTEST_WARMUP_STEP_DELAY_SEC,
     )
 
@@ -415,10 +416,11 @@ async def run_backtest_warmup_loop():
         try:
             logger.info("백테스트 자동 워밍 시작")
 
-            # 1) summary — 내부적으로 signals/strategist 백테스트 모두 캐시됨
+            # 1) summary — 내부적으로 signals/strategist 백테스트 모두 캐시됨.
+            #    워밍은 BACKTEST_WARMUP_LOOKBACK_DAYS(=30) 만 — 사용자 직접 호출은 90일 그대로.
             try:
-                await run_summary(refresh=True)
-                logger.info("  · summary 워밍 완료")
+                await run_summary(lookback_days=BACKTEST_WARMUP_LOOKBACK_DAYS, refresh=True)
+                logger.info("  · summary 워밍 완료 (lookback=%dd)", BACKTEST_WARMUP_LOOKBACK_DAYS)
             except Exception as e:
                 logger.warning("  · summary 워밍 실패: %s", e)
 
@@ -427,7 +429,11 @@ async def run_backtest_warmup_loop():
                 if step_delay:
                     await asyncio.sleep(step_delay)
                 try:
-                    await run_trade_history(source=source, refresh=True)
+                    await run_trade_history(
+                        source=source,
+                        lookback_days=BACKTEST_WARMUP_LOOKBACK_DAYS,
+                        refresh=True,
+                    )
                     logger.info("  · trades(%s) 워밍 완료", source)
                 except Exception as e:
                     logger.warning("  · trades(%s) 워밍 실패: %s", source, e)

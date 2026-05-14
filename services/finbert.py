@@ -126,10 +126,20 @@ def _openai_classify(texts: list[str]) -> list[dict] | None:
         results = parsed.get("results") or []
         if len(results) != len(texts):
             logger.warning(
-                "OpenAI 감성 응답 길이 불일치(입력 %d, 응답 %d) — neutral 폴백",
+                "OpenAI 감성 응답 길이 불일치(입력 %d, 응답 %d) — partial 매핑 + 누락분 neutral",
                 len(texts), len(results),
             )
-            return None
+            # 응답이 부족/초과해도 가능한 만큼은 매핑하고 나머지만 neutral 로 처리.
+            # 이전엔 전체 None 반환해 30개 헤드라인이 전부 neutral 로 떨어졌다.
+            out: list[dict] = [dict(_NEUTRAL) for _ in texts]
+            for i in range(min(len(results), len(texts))):
+                try:
+                    out[i] = _normalize_result(
+                        results[i].get("label"), results[i].get("confidence", 0.0),
+                    )
+                except Exception as e:
+                    logger.debug("OpenAI 감성 결과 정규화 실패 idx=%d: %s", i, e)
+            return out
         return [_normalize_result(r.get("label"), r.get("confidence", 0.0)) for r in results]
     except Exception as e:
         logger.warning("OpenAI 감성 분류 실패: %s", e)

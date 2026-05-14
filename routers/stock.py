@@ -171,15 +171,15 @@ async def api_stock_detail(
     chart = _coerce_partial(raw_chart, "chart", [], errors, upper)
     stock_news = _coerce_partial(raw_news, "news", [], errors, upper)
 
-    # AI 분석 (동기 DB 호출) — DB 실패도 부분 허용
+    # AI 분석 (DB 호출 — sync 함수는 to_thread 로 감싸 이벤트 루프 비차단)
     try:
-        latest = get_latest_report(upper)
+        latest = await asyncio.to_thread(get_latest_report, upper)
     except Exception as e:
         logger.warning("[%s] latest_report 조회 실패: %s", upper, e)
         latest = None
         errors.append("latest_report")
     try:
-        history = get_history(upper, days=30)
+        history = await asyncio.to_thread(get_history, upper, 30)
     except Exception as e:
         logger.warning("[%s] history 조회 실패: %s", upper, e)
         history = []

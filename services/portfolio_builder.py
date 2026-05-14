@@ -143,27 +143,35 @@ async def build_portfolio(
             "period": period,
         })
 
-    # 후보 종목 시세 조회 (최신 가격)
+    # 후보 종목 시세 조회 — 병렬화로 max_picks 만큼의 yfinance 호출을 동시에 처리
+    # (이전엔 직렬 루프로 종목 N개 × 수 초씩 누적되어 strategy 페이지 응답이 느렸음).
+    picks = candidates[:style_cfg["max_picks"]]
+    quote_tasks = [
+        asyncio.to_thread(fetch_quote, (rec.get("ticker", "") or "").upper())
+        for rec in picks
+    ]
+    quote_results = await asyncio.gather(*quote_tasks, return_exceptions=True)
+
     candidate_quotes = []
-    for rec in candidates[:style_cfg["max_picks"]]:
-        ticker = rec.get("ticker", "").upper()
-        try:
-            q = fetch_quote(ticker)
-            if q.get("price"):
-                candidate_quotes.append({
-                    "ticker": ticker,
-                    "name": q.get("name", ticker),
-                    "price": q["price"],
-                    "sector": q.get("sector"),
-                    "direction": rec.get("direction", "BUY"),
-                    "confidence": rec.get("confidence", "medium"),
-                    "rationale": rec.get("rationale", ""),
-                    "technicals_summary": rec.get("technicals_summary", ""),
-                    "stop_loss": rec.get("stop_loss"),
-                    "targets": rec.get("targets", []),
-                })
-        except Exception:
+    for rec, q in zip(picks, quote_results):
+        if isinstance(q, Exception):
+            logger.debug("portfolio fetch_quote 실패 (%s): %s", rec.get("ticker"), q)
             continue
+        if not q or not q.get("price"):
+            continue
+        ticker = (rec.get("ticker", "") or "").upper()
+        candidate_quotes.append({
+            "ticker": ticker,
+            "name": q.get("name", ticker),
+            "price": q["price"],
+            "sector": q.get("sector"),
+            "direction": rec.get("direction", "BUY"),
+            "confidence": rec.get("confidence", "medium"),
+            "rationale": rec.get("rationale", ""),
+            "technicals_summary": rec.get("technicals_summary", ""),
+            "stop_loss": rec.get("stop_loss"),
+            "targets": rec.get("targets", []),
+        })
 
     # 방어주 ETF (보수적/균형 성향 시)
     defensive_quotes = []

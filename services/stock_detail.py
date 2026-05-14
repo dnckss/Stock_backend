@@ -6,11 +6,19 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
+import time
 from datetime import datetime
 from typing import Any
 
 import pandas as pd
 import yfinance as yf
+
+from config import (
+    STOCK_CHART_DAILY_TTL_SEC,
+    STOCK_CHART_INTRADAY_TTL_SEC,
+    STOCK_QUOTE_CACHE_TTL_SEC,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +26,25 @@ logger = logging.getLogger(__name__)
 _company_info_cache: dict[str, dict[str, Any]] = {}
 # fetch_quote stale fallback — yfinance 차단 시 직전 성공 응답을 stale=True 로 노출.
 _quote_stale_store: dict[str, dict[str, Any]] = {}
+
+# fetch_quote / fetch_chart 인메모리 TTL 캐시 — 프런트 polling 폭주에서 yfinance 보호.
+# key 는 ticker(quote) / (ticker, period_key)(chart). 모든 접근은 lock 하에 수행.
+_quote_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_quote_cache_lock = threading.Lock()
+_chart_cache: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
+_chart_cache_lock = threading.Lock()
+
+
+_CHART_INTRADAY_KEYS = frozenset({"1min", "5min", "30min", "60min"})
+
+
+def _chart_ttl_for(period_key: str) -> int:
+    """차트 TTL — 분봉은 짧게(stale 회피), 일봉 이상은 길게(부하 절감)."""
+    return (
+        STOCK_CHART_INTRADAY_TTL_SEC
+        if period_key in _CHART_INTRADAY_KEYS
+        else STOCK_CHART_DAILY_TTL_SEC
+    )
 
 # 차트 인터벌별 기간/yfinance 인터벌 매핑
 # key = 프론트가 보내는 값, value = (yfinance period, yfinance interval)
@@ -69,8 +96,18 @@ def fetch_quote(ticker: str) -> dict[str, Any]:
     """
     실시간 시세 + 기본 정보. yfinance 차단으로 핵심 가격이 없으면
     직전 성공 응답을 stale=True 로 반환해 화면이 비지 않게 한다.
+
+    프런트가 초당 N회 polling 해도 yfinance 호출은 STOCK_QUOTE_CACHE_TTL_SEC
+    동안 1회로 합쳐진다. 같은 ticker 동시 요청은 cache hit 으로 즉시 응답.
     """
     from services.yf_limiter import throttled
+
+    upper = (ticker or "").upper().strip()
+    now = time.time()
+    with _quote_cache_lock:
+        cached = _quote_cache.get(upper)
+        if cached is not None and now - cached[0] < STOCK_QUOTE_CACHE_TTL_SEC:
+            return cached[1]
 
     t = yf.Ticker(ticker)
 
@@ -152,11 +189,19 @@ def fetch_quote(ticker: str) -> dict[str, Any]:
     # 핵심 가격이 채워졌으면 stale store 갱신
     if price is not None or prev_close is not None:
         _quote_stale_store[ticker] = result
+    # 다음 동일 ticker 요청은 캐시 히트로 즉시 응답.
+    with _quote_cache_lock:
+        _quote_cache[upper] = (time.time(), result)
     return result
 
 
 def fetch_chart(ticker: str, period: str = "1D") -> list[dict[str, Any]]:
-    """차트 데이터(OHLCV)를 가져온다."""
+    """차트 데이터(OHLCV)를 가져온다.
+
+    같은 (ticker, period) 가 인터벌별 TTL(분봉 30s, 일봉+ 5분) 안에 재요청되면
+    캐시 히트로 즉시 응답한다. 분봉의 stale 가시성과 일봉의 부하 절감을 균형.
+    """
+    upper = (ticker or "").upper().strip()
     key = period.lower().strip()
     # 축약 키 호환 매핑 (프론트에서 1m, 5m 등으로 보낼 수 있음)
     _ALIAS: dict[str, str] = {
@@ -168,6 +213,15 @@ def fetch_chart(ticker: str, period: str = "1D") -> list[dict[str, Any]]:
     preset = _CHART_PRESETS.get(key)
     if not preset:
         preset = _CHART_PRESETS["day"]
+        key = "day"
+
+    cache_key = (upper, key)
+    ttl = _chart_ttl_for(key)
+    now = time.time()
+    with _chart_cache_lock:
+        cached = _chart_cache.get(cache_key)
+        if cached is not None and now - cached[0] < ttl:
+            return cached[1]
 
     yf_period, yf_interval = preset
     try:
@@ -205,6 +259,8 @@ def fetch_chart(ticker: str, period: str = "1D") -> list[dict[str, Any]]:
         except Exception:
             continue
 
+    with _chart_cache_lock:
+        _chart_cache[cache_key] = (time.time(), bars)
     return bars
 
 

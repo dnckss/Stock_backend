@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import APIRouter, HTTPException
 
 from services.crud import count_news_items, get_news_items, sanitize_for_json
@@ -25,7 +27,10 @@ async def api_news_list(
     """
     safe_limit = max(1, min(limit, 500))
     safe_offset = max(0, offset)
-    items = get_news_items(limit=safe_limit, ticker=ticker, offset=safe_offset)
+    # Supabase sync 호출은 to_thread 로 감싸 이벤트 루프 비차단
+    items = await asyncio.to_thread(
+        get_news_items, limit=safe_limit, ticker=ticker, offset=safe_offset,
+    )
     items = enrich_feed_with_llm(items)
     payload: dict = {
         "items": items,
@@ -34,7 +39,7 @@ async def api_news_list(
         "offset": safe_offset,
     }
     if with_count:
-        payload["total"] = count_news_items(ticker=ticker)
+        payload["total"] = await asyncio.to_thread(count_news_items, ticker=ticker)
     return sanitize_for_json(payload)
 
 

@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import APIRouter
 from services.websocket import latest_cache
 from services.crud import get_all_records, sanitize_for_json
@@ -13,9 +15,13 @@ async def api_latest():
 
 @router.get("/all-records")
 async def api_all_records(limit: int = 100):
-    """DB에 저장된 전체 분석 기록 조회 — nested NaN/Inf 까지 안전 직렬화."""
+    """DB에 저장된 전체 분석 기록 조회 — nested NaN/Inf 까지 안전 직렬화.
+
+    Supabase sync client(httpx) 호출은 to_thread 로 감싸 이벤트 루프 비차단.
+    """
     safe_limit = max(1, min(int(limit) if limit else 100, 1000))
-    return sanitize_for_json(get_all_records(safe_limit))
+    rows = await asyncio.to_thread(get_all_records, safe_limit)
+    return sanitize_for_json(rows)
 
 
 @router.get("/heatmap/sp500")
