@@ -26,6 +26,7 @@ from services.scanner import (
     get_market_gauge,
     refresh_intraday_prices,
     merge_intraday_into_candidates,
+    ensure_sp500_coverage,
 )
 from services.sentiment import analyze_sentiments
 from services.earnings import get_earnings_surprises
@@ -36,6 +37,29 @@ from services.price_store import backfill_recent
 from services.websocket import manager, latest_cache
 
 logger = logging.getLogger(__name__)
+
+
+def _current_market_rows() -> list[dict]:
+    """latest_cache 의 top_picks + radar 를 하나의 rows 리스트로 반환한다."""
+    return list(latest_cache.get("top_picks") or []) + list(latest_cache.get("radar") or [])
+
+
+def _write_market_rows(rows: list[dict]) -> None:
+    """rows 를 top/radar 구조로 다시 기록한다."""
+    latest_cache["top_picks"] = rows[:REPORT_TOP_N]
+    latest_cache["radar"] = rows[REPORT_TOP_N:]
+
+
+def _ensure_latest_cache_sp500_coverage() -> int:
+    """메모리 캐시를 S&P 500 전체 종목으로 확장하고 총 row 수를 반환한다."""
+    rows = _current_market_rows()
+    if not rows:
+        return 0
+    expanded = ensure_sp500_coverage(rows)
+    if len(expanded) != len(rows):
+        _write_market_rows(expanded)
+        logger.info("메모리 마켓 캐시 S&P 500 보강: %d → %d rows", len(rows), len(expanded))
+    return len(expanded)
 
 
 def _backoff_delay(failures: int) -> int:
@@ -68,6 +92,7 @@ async def _preserve_or_restore_snapshot(reason: str) -> None:
     어느 쪽이든 'scan_stale=True' 마커를 부여해 프런트가 stale 상태를 식별할 수 있게 한다.
     """
     if latest_cache.get("top_picks"):
+        _ensure_latest_cache_sp500_coverage()
         latest_cache["scan_stale"] = True
         latest_cache["scan_stale_reason"] = reason
         latest_cache["updated_at"] = datetime.now().isoformat()
@@ -85,8 +110,8 @@ async def _preserve_or_restore_snapshot(reason: str) -> None:
         logger.warning("DB 스냅샷도 비어있음 — 캐시 복원 불가 (%s)", reason)
         return
 
-    latest_cache["top_picks"] = cached_records[:REPORT_TOP_N]
-    latest_cache["radar"] = cached_records[REPORT_TOP_N:]
+    cached_records = ensure_sp500_coverage(cached_records)
+    _write_market_rows(cached_records)
     latest_cache["scan_stale"] = True
     latest_cache["scan_stale_reason"] = reason
     latest_cache["updated_at"] = datetime.now().isoformat()
@@ -223,12 +248,11 @@ async def run_macro_loop():
 
 
 def _tickers_for_price_refresh() -> list[str]:
-    """top_picks + radar에서 중복 제거 후 최대 PRICE_TICK_MAX_SYMBOLS개."""
-    top = latest_cache.get("top_picks") or []
-    radar = latest_cache.get("radar") or []
+    """top_picks + radar를 S&P 500 전체로 보강한 뒤 최대 PRICE_TICK_MAX_SYMBOLS개."""
+    _ensure_latest_cache_sp500_coverage()
     seen: set[str] = set()
     out: list[str] = []
-    for c in list(top) + list(radar):
+    for c in _current_market_rows():
         t = (c.get("ticker") or "").upper().strip()
         if not t or t in seen:
             continue
@@ -251,7 +275,7 @@ async def run_price_tick_loop():
     failures = 0
     while True:
         try:
-            tickers = _tickers_for_price_refresh()
+            tickers = await asyncio.to_thread(_tickers_for_price_refresh)
             if not tickers:
                 await asyncio.sleep(PRICE_TICK_INTERVAL_SEC)
                 continue

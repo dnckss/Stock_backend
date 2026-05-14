@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from datetime import datetime
 from io import StringIO
+from typing import Any
 
 import pandas as pd
 import requests
@@ -18,26 +20,41 @@ from config import (
     MACRO_FALLBACK,
     MIN_VIX,
     MAX_VIX,
+    PRICE_FAST_INFO_FALLBACK_MAX_SYMBOLS,
     PRICE_DOWNLOAD_BATCH_SIZE,
     PRICE_INTRADAY_INTERVAL,
     SP500_WIKI_URL,
     SP500_WIKI_HEADERS,
+    SP500_CONSTITUENTS_CACHE_TTL_SEC,
 )
 
 logger = logging.getLogger(__name__)
+
+_sp500_constituents_cache: list[dict[str, str]] = []
+_sp500_constituents_cache_at: float = 0.0
 
 
 # ---------------------------------------------------------------------------
 # 1) 티커 수집 — Wikipedia S&P 500 구성종목
 # ---------------------------------------------------------------------------
 
-def get_sp500_constituents() -> list[dict[str, str]]:
+def get_sp500_constituents(refresh: bool = False) -> list[dict[str, str]]:
     """Wikipedia에서 S&P 500 구성종목(ticker, name, sector)을 가져온다.
 
     Returns:
         [{"ticker": "AAPL", "name": "Apple Inc.", "sector": "Information Technology"}, ...]
         실패 시 빈 리스트.
     """
+    global _sp500_constituents_cache, _sp500_constituents_cache_at
+
+    now = time.time()
+    if (
+        not refresh
+        and _sp500_constituents_cache
+        and now - _sp500_constituents_cache_at < SP500_CONSTITUENTS_CACHE_TTL_SEC
+    ):
+        return [dict(row) for row in _sp500_constituents_cache]
+
     try:
         resp = requests.get(SP500_WIKI_URL, headers=SP500_WIKI_HEADERS, timeout=15)
         resp.raise_for_status()
@@ -50,7 +67,9 @@ def get_sp500_constituents() -> list[dict[str, str]]:
             if ticker and sector:
                 rows.append({"ticker": ticker, "name": name, "sector": sector})
         print(f"S&P 500 구성종목 {len(rows)}개 수집 완료")
-        return rows
+        _sp500_constituents_cache = rows
+        _sp500_constituents_cache_at = now
+        return [dict(row) for row in rows]
     except requests.RequestException as e:
         print(f"Wikipedia 네트워크 에러: {e}")
     except (ValueError, KeyError) as e:
@@ -63,6 +82,68 @@ def get_sp500_constituents() -> list[dict[str, str]]:
 def get_all_tickers() -> list[str]:
     """S&P 500 구성종목 티커 목록을 반환한다. 실패 시 빈 리스트."""
     return sorted({c["ticker"] for c in get_sp500_constituents()})
+
+
+def _placeholder_stock(
+    ticker: str,
+    *,
+    name: str | None = None,
+    sector: str | None = None,
+    source: str = "sp500",
+) -> dict:
+    return {
+        "ticker": ticker,
+        "name": name,
+        "sector": sector,
+        "in_sp500": source == "sp500",
+        "return": None,
+        "price": None,
+        "volume": None,
+        "liquidity_ok": None,
+        "daily": [],
+        "price_available": False,
+        "scan_missing": True,
+        "universe_source": source,
+    }
+
+
+def ensure_sp500_coverage(candidates: list[dict]) -> list[dict]:
+    """
+    기존 스캔/DB 스냅샷에 없는 S&P 500 구성종목을 placeholder 로 보강한다.
+    가격 틱 루프가 다음 주기에서 전 종목 가격을 채울 수 있게 하는 목적이다.
+    """
+    rows = list(candidates or [])
+    constituents = get_sp500_constituents()
+    if not constituents:
+        return rows
+
+    by_ticker = {
+        (row.get("ticker") or "").upper().strip(): row
+        for row in rows
+        if isinstance(row, dict) and row.get("ticker")
+    }
+
+    for c in constituents:
+        ticker = (c.get("ticker") or "").upper().strip()
+        if not ticker:
+            continue
+        existing = by_ticker.get(ticker)
+        if existing is not None:
+            existing.setdefault("name", c.get("name"))
+            existing.setdefault("sector", c.get("sector"))
+            existing.setdefault("in_sp500", True)
+            existing.setdefault("price_available", existing.get("price") is not None)
+            continue
+        row = _placeholder_stock(
+            ticker,
+            name=c.get("name"),
+            sector=c.get("sector"),
+            source="sp500",
+        )
+        rows.append(row)
+        by_ticker[ticker] = row
+
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +170,8 @@ def _compute_return(series: pd.Series) -> float | None:
 def scan_stocks(tickers: list[str]) -> list[dict]:
     """
     yf.download()로 10캘린더일(≥5거래일)치 종가·거래량을 배치 조회하고,
-    거래량 필터를 적용한 뒤, 변동률 기준으로 정렬된 전체 유효 종목 리스트를 반환한다.
+    거래량 기준은 liquidity_ok 로 표시만 한 뒤, 변동률 기준으로 정렬된
+    전체 유효 종목 리스트를 반환한다.
     """
     if not tickers:
         return []
@@ -131,12 +213,12 @@ def scan_stocks(tickers: list[str]) -> list[dict]:
                     continue
 
                 last_volume = int(volume_series.iloc[-1])
-                if last_volume < MIN_VOLUME:
-                    continue
+                liquidity_ok = last_volume >= MIN_VOLUME
 
+                # 등락률을 못 구해도(데이터 1개 등) 가격·일봉이 있으면 candidates 에 포함.
+                # 그래야 ensure_sp500_coverage 가 placeholder 로 채우지 않고, 등락률 컬럼만
+                # 비어 있는 정상 row 가 화면에 나타난다(가격·거래량·일봉은 모두 표시됨).
                 ret = _compute_return(close_series)
-                if ret is None:
-                    continue
 
                 daily_bars: list[dict] = []
                 for idx, row in ticker_data.iterrows():
@@ -166,36 +248,155 @@ def scan_stocks(tickers: list[str]) -> list[dict]:
 
                 candidates.append({
                     "ticker": ticker,
-                    "return": round(ret, 6),
+                    "return": round(ret, 6) if ret is not None else None,
                     "price": round(float(close_series.iloc[-1]), 2),
                     "volume": last_volume,
+                    "liquidity_ok": liquidity_ok,
                     "daily": trimmed_bars,
                 })
             except Exception:
                 continue
 
-    candidates.sort(key=lambda x: abs(x["return"]), reverse=True)
-    print(f"스캔 결과: {len(candidates)}개 유효 종목")
+    present = {(c.get("ticker") or "").upper() for c in candidates}
+    for ticker in tickers:
+        key = (ticker or "").upper().strip()
+        if key and key not in present:
+            candidates.append(_placeholder_stock(key, source="requested"))
+            present.add(key)
+
+    candidates = ensure_sp500_coverage(candidates)
+
+    def _sort_return(item: dict) -> float:
+        ret = item.get("return")
+        try:
+            ret_f = float(ret)
+            return abs(ret_f) if math.isfinite(ret_f) else -1.0
+        except (TypeError, ValueError):
+            return -1.0
+
+    candidates.sort(key=_sort_return, reverse=True)
+    priced_count = sum(1 for c in candidates if c.get("price") is not None)
+    print(f"스캔 결과: {priced_count}/{len(candidates)}개 가격 확보")
     return candidates
 
 
-def refresh_intraday_prices(tickers: list[str]) -> dict[str, dict]:
-    """
-    yfinance fast_info로 종목별 최신 가격을 조회한다.
-    fast_info는 장중/장후 모두 최신 가격을 반환하므로 분봉보다 신뢰성이 높다.
+def _ticker_frame_from_download(data: pd.DataFrame, ticker: str, batch: list[str]) -> pd.DataFrame | None:
+    """yf.download 결과에서 ticker 1개의 OHLCV 프레임을 안전하게 추출한다."""
+    if data is None or data.empty:
+        return None
 
-    Returns:
-        { "AAPL": {"price": float, "volume": int|None, "as_of": str}, ... }
-    """
+    if isinstance(data.columns, pd.MultiIndex):
+        levels0 = set(str(v) for v in data.columns.get_level_values(0))
+        levels1 = set(str(v) for v in data.columns.get_level_values(1))
+        if ticker in levels0:
+            try:
+                return data[ticker]
+            except Exception:
+                return None
+        if ticker in levels1:
+            try:
+                return data.xs(ticker, level=1, axis=1)
+            except Exception:
+                return None
+
+    if len(batch) == 1:
+        return data
+
+    return None
+
+
+def _format_quote_as_of(idx: Any, fallback: str) -> str:
+    """pandas timestamp/index 값을 API 응답용 문자열로 변환한다."""
+    try:
+        if hasattr(idx, "to_pydatetime"):
+            return idx.to_pydatetime().isoformat()
+        if hasattr(idx, "isoformat"):
+            return idx.isoformat()
+    except Exception:
+        pass
+    return fallback
+
+
+def _refresh_intraday_prices_batch(tickers: list[str]) -> dict[str, dict]:
+    """yf.download 분봉 batch 조회로 최신 가격을 가져온다."""
+    if not tickers:
+        return {}
+
+    from services.yf_limiter import throttled
+
+    out: dict[str, dict] = {}
+    now_str = datetime.now().isoformat()
+    batch_size = max(1, PRICE_DOWNLOAD_BATCH_SIZE)
+
+    for i in range(0, len(tickers), batch_size):
+        batch = tickers[i : i + batch_size]
+        try:
+            data = throttled(
+                yf.download,
+                batch,
+                period="1d",
+                interval=PRICE_INTRADAY_INTERVAL,
+                group_by="ticker",
+                progress=False,
+                threads=True,
+                prepost=True,
+                auto_adjust=False,
+            )
+        except Exception as e:
+            logger.debug("분봉 batch 조회 실패 (batch=%d, size=%d): %s", i, len(batch), e)
+            continue
+
+        if data is None or data.empty:
+            continue
+
+        for ticker in batch:
+            try:
+                frame = _ticker_frame_from_download(data, ticker, batch)
+                if frame is None or frame.empty or "Close" not in frame:
+                    continue
+
+                close_series = frame["Close"].dropna()
+                if close_series.empty:
+                    continue
+
+                price = float(close_series.iloc[-1])
+                if not math.isfinite(price):
+                    continue
+
+                volume_int: int | None = None
+                if "Volume" in frame:
+                    volume_series = frame["Volume"].dropna()
+                    if not volume_series.empty:
+                        try:
+                            volume = float(volume_series.iloc[-1])
+                            volume_int = int(volume) if math.isfinite(volume) else None
+                        except (TypeError, ValueError, OverflowError):
+                            volume_int = None
+
+                last_idx = close_series.index[-1]
+                out[ticker] = {
+                    "price": round(price, 2),
+                    "volume": volume_int,
+                    "as_of": _format_quote_as_of(last_idx, now_str),
+                    "source": f"yf_download_{PRICE_INTRADAY_INTERVAL}",
+                }
+            except Exception:
+                continue
+
+    return out
+
+
+def _refresh_fast_info_prices(tickers: list[str]) -> dict[str, dict]:
+    """분봉 batch 누락분을 fast_info 로 제한적으로 보강한다."""
     if not tickers:
         return {}
 
     out: dict[str, dict] = {}
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = datetime.now().isoformat()
 
     from services.yf_limiter import throttled
 
-    for ticker in tickers:
+    for ticker in tickers[:PRICE_FAST_INFO_FALLBACK_MAX_SYMBOLS]:
         key = (ticker or "").upper().strip()
         if not key:
             continue
@@ -215,9 +416,37 @@ def refresh_intraday_prices(tickers: list[str]) -> dict[str, dict]:
                 "price": round(float(price), 2),
                 "volume": vol_int,
                 "as_of": now_str,
+                "source": "fast_info",
             }
         except Exception:
             continue
+
+    return out
+
+
+def refresh_intraday_prices(tickers: list[str]) -> dict[str, dict]:
+    """
+    yfinance 분봉 batch 조회로 종목별 최신 가격을 가져오고,
+    누락된 일부 심볼만 fast_info 로 보강한다.
+
+    Returns:
+        { "AAPL": {"price": float, "volume": int|None, "as_of": str}, ... }
+    """
+    if not tickers:
+        return {}
+
+    normalized = []
+    seen: set[str] = set()
+    for ticker in tickers:
+        key = (ticker or "").upper().strip()
+        if key and key not in seen:
+            seen.add(key)
+            normalized.append(key)
+
+    out = _refresh_intraday_prices_batch(normalized)
+    missing = [t for t in normalized if t not in out]
+    if missing and PRICE_FAST_INFO_FALLBACK_MAX_SYMBOLS > 0:
+        out.update(_refresh_fast_info_prices(missing))
 
     return out
 
@@ -233,8 +462,12 @@ def merge_intraday_into_candidates(candidates: list[dict], live: dict[str, dict]
             continue
         u = live[t]
         c["price"] = u["price"]
+        c["price_available"] = True
+        c["quote_source"] = u.get("source")
         if u.get("volume") is not None:
             c["volume"] = u["volume"]
+            if c.get("liquidity_ok") is None:
+                c["liquidity_ok"] = u["volume"] >= MIN_VOLUME
         c["quote_as_of"] = u["as_of"]
 
         # 기존 5일봉의 첫 종가를 기준으로, 최신 분봉 price에 맞춰 return 갱신

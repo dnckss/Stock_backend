@@ -74,6 +74,8 @@ async def _seed_initial_caches():
         from config import REPORT_TOP_N
         cached_records = await asyncio.to_thread(get_latest_scan_records)
         if cached_records:
+            from services.scanner import ensure_sp500_coverage
+            cached_records = await asyncio.to_thread(ensure_sp500_coverage, cached_records)
             latest_cache["top_picks"] = cached_records[:REPORT_TOP_N]
             latest_cache["radar"] = cached_records[REPORT_TOP_N:]
             latest_cache["updated_at"] = datetime.now().isoformat()

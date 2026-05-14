@@ -128,10 +128,13 @@ CORS_ALLOW_ORIGINS: list[str] = (
 
 # yfinance 분봉 시세 (스캔과 별도 — top/radar 종목만 자주 갱신)
 PRICE_TICK_INTERVAL_SEC = int(os.getenv("PRICE_TICK_INTERVAL_SEC", "30"))
-PRICE_TICK_MAX_SYMBOLS = int(os.getenv("PRICE_TICK_MAX_SYMBOLS", "250"))
+PRICE_TICK_MAX_SYMBOLS = int(os.getenv("PRICE_TICK_MAX_SYMBOLS", "550"))
 # 1m은 호출 부담이 크므로 기본 5m (장중 마지막 봉 기준으로 체감 갱신)
 PRICE_INTRADAY_INTERVAL = os.getenv("PRICE_INTRADAY_INTERVAL", "5m")
 PRICE_DOWNLOAD_BATCH_SIZE = int(os.getenv("PRICE_DOWNLOAD_BATCH_SIZE", "50"))
+# 분봉 batch 조회에서 누락된 심볼만 fast_info 로 보강한다. 전체 500개를 매번
+# 개별 호출하면 Yahoo rate limit 에 걸리기 쉬워 보강 개수는 별도 상한을 둔다.
+PRICE_FAST_INFO_FALLBACK_MAX_SYMBOLS = int(os.getenv("PRICE_FAST_INFO_FALLBACK_MAX_SYMBOLS", "150"))
 # Stock detail: 회사명 조회 timeout (yfinance Ticker.info)
 STOCK_PROFILE_TIMEOUT_SEC = float(os.getenv("STOCK_PROFILE_TIMEOUT_SEC", "6"))
 
@@ -334,6 +337,7 @@ MACRO_FALLBACK = {
 # S&P 500 Wikipedia 데이터 소스 (scanner + heatmap 공용)
 SP500_WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 SP500_WIKI_HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
+SP500_CONSTITUENTS_CACHE_TTL_SEC = int(os.getenv("SP500_CONSTITUENTS_CACHE_TTL_SEC", "21600"))
 
 # ---------------------------------------------------------------------------
 # Stock Universe (종목 검색용 universe 캐시)
@@ -373,10 +377,12 @@ YF_RATE_LIMIT_RETRIES = int(os.getenv("YF_RATE_LIMIT_RETRIES", "3"))
 YF_RATE_LIMIT_BACKOFF_SEC = float(os.getenv("YF_RATE_LIMIT_BACKOFF_SEC", "2.0"))
 
 # S&P 500 Heatmap
-HEATMAP_CACHE_TTL_SEC = int(os.getenv("HEATMAP_CACHE_TTL_SEC", "600"))        # 가격 캐시 10분
+HEATMAP_CACHE_TTL_SEC = int(os.getenv("HEATMAP_CACHE_TTL_SEC", "60"))         # 가격 캐시 1분
 HEATMAP_MCAP_CACHE_TTL_SEC = int(os.getenv("HEATMAP_MCAP_CACHE_TTL_SEC", "1800"))  # 시가총액 캐시 30분
 # 시가총액 동시 조회 수 — 30 은 yfinance 폭주 → 차단을 유발해 8 로 보수화
 HEATMAP_MCAP_CONCURRENCY = int(os.getenv("HEATMAP_MCAP_CONCURRENCY", "8"))
+# 오래된 DB 스냅샷이 일부 종목만 담고 있으면 첫 요청에서도 즉시 재빌드한다.
+HEATMAP_MIN_CONSTITUENTS_FOR_CACHE = int(os.getenv("HEATMAP_MIN_CONSTITUENTS_FOR_CACHE", "450"))
 
 # Market gauge (VIX -> 0~100)
 # VIX를 MIN_VIX~MAX_VIX로 클램프 후 로그 스케일로 0~100으로 변환

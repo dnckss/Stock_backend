@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 # 회사명 프로세스 내 캐시 (info 호출 실패 시 매번 재시도 방지)
 _company_info_cache: dict[str, dict[str, Any]] = {}
+# fetch_quote stale fallback — yfinance 차단 시 직전 성공 응답을 stale=True 로 노출.
+_quote_stale_store: dict[str, dict[str, Any]] = {}
 
 # 차트 인터벌별 기간/yfinance 인터벌 매핑
 # key = 프론트가 보내는 값, value = (yfinance period, yfinance interval)
@@ -51,13 +53,32 @@ def _pct(current: Any, base: Any) -> float | None:
     return _safe((c - b) / b * 100, 2)
 
 
+def _fi_get(fi: Any, key: str, default: Any = None) -> Any:
+    """yfinance LazyDict 키 접근 — lazy fetch 단계에서 raise 되어도 default 로."""
+    if fi is None:
+        return default
+    try:
+        v = fi.get(key) if hasattr(fi, "get") else None
+        return v if v is not None else default
+    except Exception as e:
+        logger.debug("fast_info[%s] 접근 실패: %s", key, e)
+        return default
+
+
 def fetch_quote(ticker: str) -> dict[str, Any]:
-    """실시간 시세 + 기본 정보를 가져온다."""
+    """
+    실시간 시세 + 기본 정보. yfinance 차단으로 핵심 가격이 없으면
+    직전 성공 응답을 stale=True 로 반환해 화면이 비지 않게 한다.
+    """
     from services.yf_limiter import throttled
 
     t = yf.Ticker(ticker)
 
-    fi = throttled(lambda: t.fast_info)
+    try:
+        fi = throttled(lambda: t.fast_info)
+    except Exception as e:
+        logger.warning("fast_info 조회 실패 (%s): %s", ticker, e)
+        fi = None
 
     # 회사 정보 캐시 활용 (info 호출은 느리고 실패할 수 있음)
     if ticker in _company_info_cache:
@@ -68,47 +89,55 @@ def fetch_quote(ticker: str) -> dict[str, Any]:
             info = throttled(lambda: t.info or {})
             if info.get("longName") or info.get("shortName"):
                 _company_info_cache[ticker] = info
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Ticker.info 조회 실패 (%s): %s", ticker, e)
 
-    price = _safe(fi.get("lastPrice"))
-    prev_close = _safe(fi.get("previousClose"))
+    price = _safe(_fi_get(fi, "lastPrice"))
+    prev_close = _safe(_fi_get(fi, "previousClose"))
+
+    # 핵심 가격 둘 다 없으면 stale fallback 시도 — 화면이 0 으로 비지 않게
+    if price is None and prev_close is None:
+        cached = _quote_stale_store.get(ticker)
+        if cached is not None:
+            logger.debug("fetch_quote stale fallback (%s)", ticker)
+            return {**cached, "stale": True, "as_of": datetime.now().isoformat()}
+
     change = _safe(price - prev_close, 2) if price is not None and prev_close is not None else None
     change_pct = _pct(price, prev_close)
 
-    return {
+    result = {
         # 현재가
         "price": price,
         "change": change,
         "change_pct": change_pct,
-        "currency": fi.get("currency", "USD"),
+        "currency": _fi_get(fi, "currency", "USD"),
 
         # 당일 시세
-        "open": _safe(fi.get("open")),
-        "day_high": _safe(fi.get("dayHigh")),
-        "day_low": _safe(fi.get("dayLow")),
+        "open": _safe(_fi_get(fi, "open")),
+        "day_high": _safe(_fi_get(fi, "dayHigh")),
+        "day_low": _safe(_fi_get(fi, "dayLow")),
         "prev_close": prev_close,
-        "volume": fi.get("lastVolume"),
-        "avg_volume": fi.get("tenDayAverageVolume"),
+        "volume": _fi_get(fi, "lastVolume"),
+        "avg_volume": _fi_get(fi, "tenDayAverageVolume"),
 
         # 52주
-        "year_high": _safe(fi.get("yearHigh")),
-        "year_low": _safe(fi.get("yearLow")),
+        "year_high": _safe(_fi_get(fi, "yearHigh")),
+        "year_low": _safe(_fi_get(fi, "yearLow")),
 
         # 기업 정보
         "name": info.get("longName") or info.get("shortName") or ticker,
         "sector": info.get("sector"),
         "industry": info.get("industry"),
-        "market_cap": fi.get("marketCap"),
+        "market_cap": _fi_get(fi, "marketCap"),
         "pe_ratio": _safe(info.get("trailingPE")),
         "forward_pe": _safe(info.get("forwardPE")),
         "dividend_yield": _safe(info.get("dividendYield"), 4),
         "beta": _safe(info.get("beta")),
-        "shares": fi.get("shares"),
+        "shares": _fi_get(fi, "shares"),
 
         # 이동평균
-        "ma_50": _safe(fi.get("fiftyDayAverage")),
-        "ma_200": _safe(fi.get("twoHundredDayAverage")),
+        "ma_50": _safe(_fi_get(fi, "fiftyDayAverage")),
+        "ma_200": _safe(_fi_get(fi, "twoHundredDayAverage")),
 
         # 호가
         "bid": _safe(info.get("bid")),
@@ -116,8 +145,14 @@ def fetch_quote(ticker: str) -> dict[str, Any]:
         "bid_size": info.get("bidSize"),
         "ask_size": info.get("askSize"),
 
+        "stale": False,
         "as_of": datetime.now().isoformat(),
     }
+
+    # 핵심 가격이 채워졌으면 stale store 갱신
+    if price is not None or prev_close is not None:
+        _quote_stale_store[ticker] = result
+    return result
 
 
 def fetch_chart(ticker: str, period: str = "1D") -> list[dict[str, Any]]:

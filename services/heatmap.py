@@ -15,6 +15,7 @@ from config import (
     HEATMAP_CACHE_TTL_SEC,
     HEATMAP_MCAP_CACHE_TTL_SEC,
     HEATMAP_MCAP_CONCURRENCY,
+    HEATMAP_MIN_CONSTITUENTS_FOR_CACHE,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,10 +67,11 @@ async def _fetch_market_caps(tickers: list[str]) -> dict[str, float | None]:
 # Price / Change (batch download)
 # ---------------------------------------------------------------------------
 
-def _fetch_prices(tickers: list[str]) -> dict[str, dict[str, float | None]]:
+def _fetch_prices(tickers: list[str]) -> dict[str, dict[str, Any]]:
     """
     price_history DB 우선 조회 + 누락 시 yfinance fallback.
-    각 ticker 의 마지막·직전 종가로 일일 등락률 계산.
+    각 ticker 의 마지막·직전 종가로 일일 등락률 계산 후,
+    가능한 경우 yfinance 분봉 최신가를 덮어씌운다.
     """
     if not tickers:
         return {}
@@ -83,29 +85,69 @@ def _fetch_prices(tickers: list[str]) -> dict[str, dict[str, float | None]]:
         close_df = fetch_close_prices(tickers, start, end)
     except Exception as e:
         logger.warning("히트맵 price_store 조회 실패: %s", e)
-        return {}
+        close_df = None
 
-    if close_df is None or close_df.empty:
-        return {}
-
-    result: dict[str, dict[str, float | None]] = {}
-    for t in tickers:
-        if t not in close_df.columns:
-            continue
-        series = close_df[t].dropna()
-        if series.empty:
-            continue
-        try:
-            price = float(series.iloc[-1])
-            if not math.isfinite(price):
+    result: dict[str, dict[str, Any]] = {}
+    if close_df is not None and not close_df.empty:
+        for t in tickers:
+            if t not in close_df.columns:
                 continue
-            prev = float(series.iloc[-2]) if len(series) >= 2 else None
-            if prev is not None and not math.isfinite(prev):
-                prev = None
-            change = round((price - prev) / prev * 100, 2) if prev and prev != 0 else None
-            result[t] = {"price": round(price, 2), "change_pct": change}
-        except (IndexError, TypeError, ValueError):
+            series = close_df[t].dropna()
+            if series.empty:
+                continue
+            try:
+                price = float(series.iloc[-1])
+                if not math.isfinite(price):
+                    continue
+                prev = float(series.iloc[-2]) if len(series) >= 2 else None
+                if prev is not None and not math.isfinite(prev):
+                    prev = None
+                change = round((price - prev) / prev * 100, 2) if prev and prev != 0 else None
+                result[t] = {
+                    "price": round(price, 2),
+                    "change_pct": change,
+                    "previous_close": round(prev, 2) if prev is not None else None,
+                    "quote_as_of": series.index[-1].date().isoformat()
+                    if hasattr(series.index[-1], "date") else None,
+                    "price_source": "daily_close",
+                }
+            except (IndexError, TypeError, ValueError):
+                continue
+
+    try:
+        from services.scanner import refresh_intraday_prices
+        live = refresh_intraday_prices(tickers)
+    except Exception as e:
+        logger.warning("히트맵 분봉 가격 조회 실패: %s", e)
+        live = {}
+
+    for t, quote in live.items():
+        price = quote.get("price")
+        try:
+            live_price = float(price)
+        except (TypeError, ValueError):
             continue
+        if not math.isfinite(live_price):
+            continue
+
+        existing = result.get(t, {})
+        prev = existing.get("previous_close")
+        change = None
+        try:
+            prev_float = float(prev) if prev is not None else None
+            if prev_float and math.isfinite(prev_float) and prev_float != 0:
+                change = round((live_price - prev_float) / prev_float * 100, 2)
+        except (TypeError, ValueError):
+            change = existing.get("change_pct")
+
+        result[t] = {
+            **existing,
+            "price": round(live_price, 2),
+            "change_pct": change if change is not None else existing.get("change_pct"),
+            "volume": quote.get("volume"),
+            "quote_as_of": quote.get("as_of"),
+            "price_source": quote.get("source") or "intraday",
+        }
     return result
 
 
@@ -154,19 +196,28 @@ async def build_sp500_heatmap() -> dict[str, Any]:
     tickers = [c["ticker"] for c in constituents]
     prices = await asyncio.to_thread(_fetch_prices, tickers)
 
-    # 섹터별 그룹핑
+    # 섹터별 그룹핑. 가격이 없어도 S&P 500 구성종목 자체는 빠뜨리지 않는다.
     sectors_map: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    priced_count = 0
+    live_price_count = 0
     for c in constituents:
         t = c["ticker"]
-        p_data = prices.get(t)
-        if not p_data:
-            continue
+        p_data = prices.get(t) or {}
+        if p_data.get("price") is not None:
+            priced_count += 1
+        if str(p_data.get("price_source") or "").startswith(("yf_download", "fast_info", "intraday")):
+            live_price_count += 1
         sectors_map[c["sector"]].append({
             "ticker": t,
             "name": c["name"],
             "market_cap": c["market_cap"],
-            "change_pct": p_data["change_pct"],
-            "price": p_data["price"],
+            "change_pct": p_data.get("change_pct"),
+            "price": p_data.get("price"),
+            "previous_close": p_data.get("previous_close"),
+            "volume": p_data.get("volume"),
+            "quote_as_of": p_data.get("quote_as_of"),
+            "price_source": p_data.get("price_source") or "unavailable",
+            "price_available": p_data.get("price") is not None,
         })
 
     # 섹터 내 시가총액 내림차순 정렬
@@ -179,6 +230,12 @@ async def build_sp500_heatmap() -> dict[str, Any]:
     return {
         "sectors": sectors_list,
         "updated_at": datetime.now(timezone.utc).isoformat(),
+        "meta": {
+            "constituents_count": len(constituents),
+            "priced_count": priced_count,
+            "missing_price_count": max(0, len(constituents) - priced_count),
+            "live_price_count": live_price_count,
+        },
     }
 
 
@@ -191,6 +248,19 @@ def _heatmap_has_content(result: dict[str, Any] | None) -> bool:
         return False
     total_stocks = sum(len(s.get("stocks") or []) for s in sectors)
     return total_stocks > 0
+
+
+def _heatmap_stock_count(result: dict[str, Any] | None) -> int:
+    """히트맵 응답에 포함된 총 종목 수."""
+    if not result:
+        return 0
+    sectors = result.get("sectors") or []
+    return sum(len(s.get("stocks") or []) for s in sectors)
+
+
+def _heatmap_cache_is_complete(result: dict[str, Any] | None) -> bool:
+    """DB/메모리 스냅샷이 S&P 500 전체 화면용으로 충분한지 판단한다."""
+    return _heatmap_stock_count(result) >= HEATMAP_MIN_CONSTITUENTS_FOR_CACHE
 
 
 async def _background_refresh() -> None:
@@ -238,11 +308,17 @@ async def get_cached_sp500_heatmap() -> dict[str, Any]:
     from services.crud import get_heatmap_snapshot
     db_data = await asyncio.to_thread(get_heatmap_snapshot)
     if db_data:
-        _heatmap_cache = db_data
-        _heatmap_cache_at = 0.0  # stale 표시 → 다음 요청에서 갱신 트리거
-        if need_refresh:
-            _refresh_task = asyncio.create_task(_background_refresh())
-        return db_data
+        if _heatmap_cache_is_complete(db_data):
+            _heatmap_cache = db_data
+            _heatmap_cache_at = 0.0  # stale 표시 → 다음 요청에서 갱신 트리거
+            if need_refresh:
+                _refresh_task = asyncio.create_task(_background_refresh())
+            return db_data
+        logger.info(
+            "히트맵 DB 스냅샷 불완전(stocks=%d < %d) — 즉시 재빌드",
+            _heatmap_stock_count(db_data),
+            HEATMAP_MIN_CONSTITUENTS_FOR_CACHE,
+        )
 
     # 4) 어디에도 없음 → 동기 빌드 (최초 1회)
     async with _heatmap_lock:
