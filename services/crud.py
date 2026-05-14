@@ -121,8 +121,10 @@ def get_all_records(limit: int = 100) -> list:
     return _sanitize(resp.data)
 
 
-_BACKTEST_PAGE_SIZE = 1000
-_BACKTEST_MAX_PAGES = 50  # 최대 50,000건 (안전 상한)
+# Supabase statement timeout(57014) 회피: 페이지당 행 수를 줄여 각 쿼리가 더 빨리 끝나게 한다.
+# 1000 → 500 → 250 으로 계속 줄여, 페이지가 깊어져도 각 쿼리 자체는 timeout 회피.
+_BACKTEST_PAGE_SIZE = 250
+_BACKTEST_MAX_PAGES = 200  # 최대 50,000건 유지 (페이지 사이즈 1/4 → 페이지 상한 4배)
 _BACKTEST_PAGE_MAX_RETRIES = 3
 _BACKTEST_PAGE_RETRY_BASE_SEC = 0.5
 
