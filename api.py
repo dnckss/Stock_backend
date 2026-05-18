@@ -43,12 +43,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
 # orjson: stdlib json 대비 5~10배 빠른 직렬화 + NaN/Inf 자동 None 처리(OPT_PASSTHROUGH 미사용).
-# ORJSONResponse 가 미설치 환경에서 import 실패해도 폴백되도록 안전하게 처리.
+# ORJSONResponse 자체는 fastapi 가 항상 export 하지만, 실제 render() 시 orjson 모듈을
+# 동적으로 require 하므로 ``import orjson`` 이 실패하면 우리도 JSONResponse 로 폴백한다.
+# (이 가드를 빼면 응답 렌더링 시점에 AssertionError: orjson must be installed 가 난다.)
 try:
+    import orjson  # noqa: F401 — 미설치 시 ImportError 발생
     from fastapi.responses import ORJSONResponse  # type: ignore
     _DEFAULT_RESPONSE_CLASS = ORJSONResponse
+    logger.info("orjson 사용 — ORJSONResponse 활성")
 except ImportError:  # pragma: no cover — orjson 누락 시 stdlib 폴백
     from fastapi.responses import JSONResponse as _DEFAULT_RESPONSE_CLASS  # type: ignore
+    logger.warning(
+        "orjson 미설치 — JSONResponse 폴백. 설치하려면: pip install orjson==3.11.9",
+    )
 
 logger.info("FastAPI/표준 import 완료, services import 시작")
 
