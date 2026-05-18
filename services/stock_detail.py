@@ -54,9 +54,11 @@ _CHART_PRESETS: dict[str, tuple[str, str]] = {
     "5min": ("60d", "5m"),       # 5분봉 — 최대 60일
     "30min": ("60d", "30m"),     # 30분봉 — 최대 60일
     "60min": ("60d", "60m"),     # 60분봉 — 최대 60일
-    # 일봉 이상 — 가능한 한 긴 history 를 노출 (yfinance 가 종목별 상장일까지 알아서 끊음)
-    "day": ("5y", "1d"),         # 일봉 — 5년
-    "week": ("10y", "1wk"),      # 주봉 — 10년
+    # 일봉 이상 — 상장일부터 전체 history (yfinance 가 종목별 상장일까지 알아서 끊음).
+    # 일봉 max 는 종목에 따라 1k~12k bars (AAPL 1980 상장 ≈ 11.5k). orjson + GZip 으로
+    # wire 비용은 ~100KB 수준. 응답 캐시는 STOCK_CHART_DAILY_TTL_SEC(기본 30분)로 재호출 회피.
+    "day": ("max", "1d"),        # 일봉 — 상장 이후 전체
+    "week": ("max", "1wk"),      # 주봉 — 상장 이후 전체
     "month": ("max", "1mo"),     # 월봉 — 전체
     "year": ("max", "3mo"),      # 분기봉 — 전체
 }

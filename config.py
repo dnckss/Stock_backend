@@ -156,7 +156,10 @@ STOCK_PROFILE_TIMEOUT_SEC = float(os.getenv("STOCK_PROFILE_TIMEOUT_SEC", "6"))
 #   프런트 polling(초당 N회) 폭주 시 yfinance 호출 1/N 로 줄여 부하 차단.
 STOCK_QUOTE_CACHE_TTL_SEC = int(os.getenv("STOCK_QUOTE_CACHE_TTL_SEC", "15"))
 STOCK_CHART_INTRADAY_TTL_SEC = int(os.getenv("STOCK_CHART_INTRADAY_TTL_SEC", "30"))
-STOCK_CHART_DAILY_TTL_SEC = int(os.getenv("STOCK_CHART_DAILY_TTL_SEC", "300"))
+# 일봉/주봉/월봉 차트는 상장일부터 전체(period="max") 를 받기 때문에 응답이 ~100KB 수준이다.
+# 과거 데이터는 변하지 않으므로 TTL 을 길게(30분) 잡아 yfinance 호출 부담을 크게 줄인다.
+# 장중 마지막 봉(오늘)의 실시간 close 는 fetch_quote(STOCK_QUOTE_CACHE_TTL_SEC=15s)가 별도 갱신.
+STOCK_CHART_DAILY_TTL_SEC = int(os.getenv("STOCK_CHART_DAILY_TTL_SEC", "1800"))
 
 # ---------------------------------------------------------------------------
 # Stock Fundamentals (종목 펀더멘털)
