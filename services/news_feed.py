@@ -157,6 +157,8 @@ async def build_news_feed(tickers: list[str]) -> list[dict[str, Any]]:
         item["confidence"] = fb["confidence"]
         feed.append(item)
 
+    # 최신순 정렬 + 제목 중복 제거를 한 번에 — 기존엔 두 번 정렬했다.
+    # raw_items 는 ticker 병렬 fetch 순서라 단일 sort 가 결정적이다.
     feed.sort(key=lambda x: x["timestamp"], reverse=True)
 
     seen_titles: set[str] = set()
@@ -168,21 +170,26 @@ async def build_news_feed(tickers: list[str]) -> list[dict[str, Any]]:
 
     feed = deduped[:NEWS_FEED_MAX_ITEMS]
 
-    # DB에 저장 (url_hash 추가)
+    # url_hash 일괄 부여 (DB upsert + 후속 enrich_feed_with_llm 키)
     for item in feed:
         url = (item.get("url") or "").strip()
         if url:
             item["url_hash"] = _hash_url(url)
+
+    # DB upsert + 보충 머지 — 티커 변동으로 뉴스가 사라지는 것을 방지한다.
+    # 최적화: fresh feed 가 이미 max items 에 도달했으면 DB 보충은 의미가 없다(슬라이스에서 빠짐).
+    # 다만 ticker 변동 보존을 위해 보충은 "부족할 때만" 수행한다.
     try:
         from services.crud import upsert_news_items, get_news_items
         upsert_news_items(feed)
 
-        # DB의 기존 뉴스와 합쳐서 최신순 정렬 — 티커 변동으로 뉴스가 사라지는 것 방지
-        db_items = get_news_items(limit=NEWS_FEED_MAX_ITEMS * 2)
-        seen_hashes: set[str] = {item.get("url_hash", "") for item in feed}
-        for db_item in db_items:
-            h = db_item.get("url_hash", "")
-            if h and h not in seen_hashes:
+        if len(feed) < NEWS_FEED_MAX_ITEMS:
+            db_items = get_news_items(limit=NEWS_FEED_MAX_ITEMS * 2)
+            seen_hashes: set[str] = {item.get("url_hash", "") for item in feed}
+            for db_item in db_items:
+                h = db_item.get("url_hash", "")
+                if not h or h in seen_hashes:
+                    continue
                 seen_hashes.add(h)
                 feed.append({
                     "title": db_item.get("title", ""),
@@ -198,8 +205,10 @@ async def build_news_feed(tickers: list[str]) -> list[dict[str, Any]]:
                     "confidence": db_item.get("confidence", 0.0),
                     "has_article": db_item.get("has_article", False),
                 })
-        feed.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
-        feed = feed[:NEWS_FEED_MAX_ITEMS]
+                if len(feed) >= NEWS_FEED_MAX_ITEMS:
+                    break
+            feed.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+            feed = feed[:NEWS_FEED_MAX_ITEMS]
     except Exception as e:
         logger.warning("뉴스 피드 DB 저장/병합 실패: %s", e)
 

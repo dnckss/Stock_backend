@@ -5,6 +5,8 @@ pydantic==2.12.5
 python-dotenv==1.2.2
 # FastAPI UploadFile/Form (routers/chat.py 의 파일 업로드 endpoint 에 필수)
 python-multipart==0.0.20
+# orjson: stdlib json 대비 5~10배 빠른 직렬화. ORJSONResponse 로 모든 API 응답 가속.
+orjson==3.11.9
 
 # HTTP / crawling
 httpx==0.28.1

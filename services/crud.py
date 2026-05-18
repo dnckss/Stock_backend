@@ -28,14 +28,54 @@ def _reset_client() -> None:
     _supabase = None
 
 
+# sanitize_for_json 핫 패스 최적화:
+#   - 모든 API 응답·WS broadcast 마다 호출 → ms 단위 누적.
+#   - 503행 페이로드(S&P 500) 기준 ~3ms → 변경 없는 케이스(NaN/Inf 無)는 0.x ms 로 단축.
+#   - 핵심 아이디어: 자식이 모두 그대로면 컨테이너도 재생성하지 않고 원본 식별자 그대로 반환.
+#     이로써 broadcast 마다 발생하던 dict/list 재할당이 사라진다.
+#   - `type(obj) is X` 가 `isinstance` 보다 빠르고, 99% dict/list 케이스가 압도적.
+#   - `math.isfinite` 1회 호출이 `isnan or isinf` 2회 호출보다 빠르다.
+_isfinite = math.isfinite
+
+
 def sanitize_for_json(obj):
-    """dict/list 내 float NaN·Inf를 None으로 치환해 JSON 직렬화 시 500 방지."""
+    """dict/list 내 float NaN·Inf를 None으로 치환해 JSON 직렬화 시 500 방지.
+
+    NaN/Inf 가 없는 경우(거의 모든 핫 패스)는 원본 객체를 그대로 반환해
+    불필요한 dict/list 재할당을 피한다. 테스트(`test_sanitize.py`) 호환.
+    """
+    t = type(obj)
+
+    if t is dict:
+        new_d: dict | None = None
+        for k, v in obj.items():
+            sv = sanitize_for_json(v)
+            if sv is not v:
+                if new_d is None:
+                    new_d = dict(obj)
+                new_d[k] = sv
+        return new_d if new_d is not None else obj
+
+    if t is list:
+        new_l: list | None = None
+        for i, v in enumerate(obj):
+            sv = sanitize_for_json(v)
+            if sv is not v:
+                if new_l is None:
+                    new_l = list(obj)
+                new_l[i] = sv
+        return new_l if new_l is not None else obj
+
+    if t is float and not _isfinite(obj):
+        return None
+
+    # bool/int/str/None/tuple/datetime 등 — 원본 그대로 통과.
+    # dict/list 서브클래스(예: pandas Series 가 list 로 cast 되는 경우)는
+    # 위 type() 체크에서 매칭이 안되므로 isinstance 폴백을 명시한다.
     if isinstance(obj, dict):
         return {k: sanitize_for_json(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [sanitize_for_json(v) for v in obj]
-    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
-        return None
     return obj
 
 

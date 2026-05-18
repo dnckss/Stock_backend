@@ -40,6 +40,15 @@ except ImportError:
 from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+
+# orjson: stdlib json 대비 5~10배 빠른 직렬화 + NaN/Inf 자동 None 처리(OPT_PASSTHROUGH 미사용).
+# ORJSONResponse 가 미설치 환경에서 import 실패해도 폴백되도록 안전하게 처리.
+try:
+    from fastapi.responses import ORJSONResponse  # type: ignore
+    _DEFAULT_RESPONSE_CLASS = ORJSONResponse
+except ImportError:  # pragma: no cover — orjson 누락 시 stdlib 폴백
+    from fastapi.responses import JSONResponse as _DEFAULT_RESPONSE_CLASS  # type: ignore
 
 logger.info("FastAPI/표준 import 완료, services import 시작")
 
@@ -143,9 +152,19 @@ async def lifespan(app: FastAPI):
 
 
 
-app = FastAPI(lifespan=lifespan, title="Woochan AI Quant Terminal API")
+app = FastAPI(
+    lifespan=lifespan,
+    title="Woochan AI Quant Terminal API",
+    # 모든 라우터 응답을 orjson 으로 직렬화 — stdlib json 대비 5~10배 빠르고
+    # NaN/Inf 는 sanitize_for_json 이 이미 None 으로 치환했으므로 orjson 의 strict 모드와 호환.
+    default_response_class=_DEFAULT_RESPONSE_CLASS,
+)
 
-from config import CORS_ALLOW_ORIGINS
+from config import CORS_ALLOW_ORIGINS, GZIP_MIN_SIZE_BYTES
+
+# GZip 압축: 큰 JSON 응답(히트맵·전체기록 등)을 전송 단계에서 70~90% 축소.
+# 작은 응답(< GZIP_MIN_SIZE_BYTES) 은 압축 오버헤드가 더 크므로 그대로 둔다.
+app.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_SIZE_BYTES)
 
 # allow_credentials 는 화이트리스트일 때만 True (브라우저 정책상 "*" 와 동시 사용 불가)
 _cors_allow_credentials = CORS_ALLOW_ORIGINS != ["*"]

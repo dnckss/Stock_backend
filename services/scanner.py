@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from io import StringIO
 from typing import Any
@@ -15,6 +16,7 @@ from config import (
     MIN_VOLUME,
     SCAN_TOP_N,
     SCAN_TRADING_DAYS,
+    SCAN_DOWNLOAD_BATCH_PARALLELISM,
     MACRO_MARQUEE,
     MACRO_SIDEBAR,
     MACRO_FALLBACK,
@@ -179,99 +181,150 @@ def _compute_return(ohlc: pd.DataFrame) -> float | None:
     return (last_close - first_open) / first_open
 
 
+def _download_batch(batch: list[str]) -> pd.DataFrame | None:
+    """yf.download 1회 — 예외/빈 결과는 None 반환."""
+    if not batch:
+        return None
+    try:
+        data = yf.download(
+            batch,
+            period="10d",
+            interval="1d",
+            group_by="ticker",
+            progress=False,
+            threads=True,
+        )
+    except Exception as e:
+        logger.warning("yf.download batch (size=%d) 실패: %s", len(batch), e)
+        return None
+    if data is None or data.empty:
+        return None
+    return data
+
+
+def _parse_batch_candidates(data: pd.DataFrame, batch: list[str]) -> list[dict]:
+    """yf.download 결과 1건에서 ticker 별 candidate dict 리스트를 추출한다."""
+    out: list[dict] = []
+    is_single = len(batch) == 1
+
+    # MultiIndex 의 level 0 (ticker) 집합을 1회만 계산.
+    if not is_single and isinstance(data.columns, pd.MultiIndex):
+        level0_tickers = set(data.columns.get_level_values(0))
+    else:
+        level0_tickers = set(batch)
+
+    for ticker in batch:
+        try:
+            if is_single:
+                ticker_data = data
+            else:
+                if ticker not in level0_tickers:
+                    continue
+                ticker_data = data[ticker]
+
+            close_series = ticker_data["Close"].dropna()
+            volume_series = ticker_data["Volume"].dropna()
+
+            if close_series.empty or volume_series.empty:
+                continue
+
+            last_volume = int(volume_series.iloc[-1])
+            liquidity_ok = last_volume >= MIN_VOLUME
+
+            # 등락률을 못 구해도(데이터 1개 등) 가격·일봉이 있으면 candidates 에 포함.
+            # 그래야 ensure_sp500_coverage 가 placeholder 로 채우지 않고, 등락률 컬럼만
+            # 비어 있는 정상 row 가 화면에 나타난다(가격·거래량·일봉은 모두 표시됨).
+            ret = _compute_return(ticker_data)
+
+            daily_bars: list[dict] = []
+            for idx, row in ticker_data.iterrows():
+                try:
+                    ts = idx if hasattr(idx, "strftime") else pd.Timestamp(idx)
+                    date_str = ts.strftime("%Y-%m-%d")
+                    o = row.get("Open")
+                    h = row.get("High")
+                    l_ = row.get("Low")
+                    c = row.get("Close")
+                    v = row.get("Volume")
+                    if c is None or (pd.isna(c)):
+                        continue
+                    daily_bars.append({
+                        "date": date_str,
+                        "open": round(float(o), 2) if o is not None and not pd.isna(o) else None,
+                        "high": round(float(h), 2) if h is not None and not pd.isna(h) else None,
+                        "low": round(float(l_), 2) if l_ is not None and not pd.isna(l_) else None,
+                        "close": round(float(c), 2),
+                        "volume": int(v) if v is not None and not pd.isna(v) else 0,
+                    })
+                except Exception:
+                    continue
+
+            # _compute_return 와 동일한 5 포인트 윈도우로 통일.
+            # merge_intraday_into_candidates 가 daily[0].close 를 base 로 사용하므로
+            # 같은 첫 종가가 잡히도록 keep == SCAN_TRADING_DAYS.
+            keep = SCAN_TRADING_DAYS
+            trimmed_bars = daily_bars[-keep:] if len(daily_bars) > keep else daily_bars
+
+            out.append({
+                "ticker": ticker,
+                "return": round(ret, 6) if ret is not None else None,
+                "price": round(float(close_series.iloc[-1]), 2),
+                "volume": last_volume,
+                "liquidity_ok": liquidity_ok,
+                "daily": trimmed_bars,
+            })
+        except Exception:
+            continue
+    return out
+
+
 def scan_stocks(tickers: list[str]) -> list[dict]:
     """
     yf.download()로 10캘린더일(≥5거래일)치 종가·거래량을 배치 조회하고,
     거래량 기준은 liquidity_ok 로 표시만 한 뒤, 변동률 기준으로 정렬된
     전체 유효 종목 리스트를 반환한다.
+
+    배치 동시 다운로드: yf.download 자체가 threads=True 로 종목 내부 병렬을 하지만
+    batch(=100종목) 5개를 직렬로 도는 게 그 사이클 시간의 대부분이었다.
+    ``SCAN_DOWNLOAD_BATCH_PARALLELISM`` 만큼 batch 를 동시에 다운로드해 사이클을
+    수배~5배 단축한다. yfinance 자체 connection pool + 한 IP 당 동시 요청 한도를
+    고려해 기본 3 으로 보수화.
     """
     if not tickers:
         return []
 
+    # batch 분할
+    batches = [
+        tickers[i : i + _DOWNLOAD_BATCH_SIZE]
+        for i in range(0, len(tickers), _DOWNLOAD_BATCH_SIZE)
+    ]
+
     candidates: list[dict] = []
+    workers = max(1, min(SCAN_DOWNLOAD_BATCH_PARALLELISM, len(batches)))
 
-    for i in range(0, len(tickers), _DOWNLOAD_BATCH_SIZE):
-        batch = tickers[i : i + _DOWNLOAD_BATCH_SIZE]
-        try:
-            data = yf.download(
-                batch,
-                period="10d",
-                interval="1d",
-                group_by="ticker",
-                progress=False,
-                threads=True,
-            )
-        except Exception as e:
-            print(f"yf.download 에러 (batch {i}): {e}")
-            continue
-
-        if data.empty:
-            continue
-
-        is_single = len(batch) == 1
-        for ticker in batch:
-            try:
-                if is_single:
-                    ticker_data = data
-                else:
-                    if ticker not in data.columns.get_level_values(0):
-                        continue
-                    ticker_data = data[ticker]
-
-                close_series = ticker_data["Close"].dropna()
-                volume_series = ticker_data["Volume"].dropna()
-
-                if close_series.empty or volume_series.empty:
+    if workers == 1 or len(batches) == 1:
+        # 단일 batch 또는 동시성 비활성 — 직렬 폴백
+        for batch in batches:
+            data = _download_batch(batch)
+            if data is not None:
+                candidates.extend(_parse_batch_candidates(data, batch))
+    else:
+        # ThreadPoolExecutor 로 batch 다운로드 병렬화.
+        # 각 batch 의 _parse_batch_candidates 는 CPU 바운드이지만 작아서 thread 로 충분.
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="scan-batch") as ex:
+            futures = {ex.submit(_download_batch, batch): batch for batch in batches}
+            for fut in as_completed(futures):
+                batch = futures[fut]
+                try:
+                    data = fut.result()
+                except Exception as e:
+                    logger.warning("batch (size=%d) thread 실패: %s", len(batch), e)
                     continue
+                if data is None:
+                    continue
+                candidates.extend(_parse_batch_candidates(data, batch))
 
-                last_volume = int(volume_series.iloc[-1])
-                liquidity_ok = last_volume >= MIN_VOLUME
-
-                # 등락률을 못 구해도(데이터 1개 등) 가격·일봉이 있으면 candidates 에 포함.
-                # 그래야 ensure_sp500_coverage 가 placeholder 로 채우지 않고, 등락률 컬럼만
-                # 비어 있는 정상 row 가 화면에 나타난다(가격·거래량·일봉은 모두 표시됨).
-                ret = _compute_return(ticker_data)
-
-                daily_bars: list[dict] = []
-                for idx, row in ticker_data.iterrows():
-                    try:
-                        ts = idx if hasattr(idx, "strftime") else pd.Timestamp(idx)
-                        date_str = ts.strftime("%Y-%m-%d")
-                        o = row.get("Open")
-                        h = row.get("High")
-                        l_ = row.get("Low")
-                        c = row.get("Close")
-                        v = row.get("Volume")
-                        if c is None or (pd.isna(c)):
-                            continue
-                        daily_bars.append({
-                            "date": date_str,
-                            "open": round(float(o), 2) if o is not None and not pd.isna(o) else None,
-                            "high": round(float(h), 2) if h is not None and not pd.isna(h) else None,
-                            "low": round(float(l_), 2) if l_ is not None and not pd.isna(l_) else None,
-                            "close": round(float(c), 2),
-                            "volume": int(v) if v is not None and not pd.isna(v) else 0,
-                        })
-                    except Exception:
-                        continue
-
-                # _compute_return 와 동일한 5 포인트 윈도우로 통일.
-                # merge_intraday_into_candidates 가 daily[0].close 를 base 로 사용하므로
-                # 같은 첫 종가가 잡히도록 keep == SCAN_TRADING_DAYS.
-                keep = SCAN_TRADING_DAYS
-                trimmed_bars = daily_bars[-keep:] if len(daily_bars) > keep else daily_bars
-
-                candidates.append({
-                    "ticker": ticker,
-                    "return": round(ret, 6) if ret is not None else None,
-                    "price": round(float(close_series.iloc[-1]), 2),
-                    "volume": last_volume,
-                    "liquidity_ok": liquidity_ok,
-                    "daily": trimmed_bars,
-                })
-            except Exception:
-                continue
-
+    # 누락 ticker 는 placeholder 보강 (가격 틱 루프가 추후 채움).
     present = {(c.get("ticker") or "").upper() for c in candidates}
     for ticker in tickers:
         key = (ticker or "").upper().strip()
@@ -291,7 +344,8 @@ def scan_stocks(tickers: list[str]) -> list[dict]:
 
     candidates.sort(key=_sort_return, reverse=True)
     priced_count = sum(1 for c in candidates if c.get("price") is not None)
-    print(f"스캔 결과: {priced_count}/{len(candidates)}개 가격 확보")
+    logger.info("스캔 결과: %d/%d개 가격 확보 (batch=%d, workers=%d)",
+                priced_count, len(candidates), len(batches), workers)
     return candidates
 
 
@@ -555,22 +609,112 @@ def _fetch_macro_value(ticker: str, decimals: int) -> dict:
         return {"value": None, "change": None, "pct": None, "stale": False}
 
 
+def _fetch_macro_values_batch(ticker_decimals: dict[str, int]) -> dict[str, dict]:
+    """
+    매크로 지표 ticker 들을 1회 yf.download batch 로 모두 조회한다.
+
+    개선 전: 14개 ticker × fast_info 호출 = 14회 yfinance 왕복 (각 ~수백 ms).
+    개선 후: 1회 batch download (~1초 미만) + 종가/직전 종가 계산.
+
+    fast_info 의 lastPrice 는 분봉 마지막 값에 가깝지만, 매크로는 1분 주기로 갱신되므로
+    daily 종가로도 사용자 체감 차이는 미미하다. batch 실패 시 ticker 별 _fetch_macro_value
+    폴백으로 가용성 유지.
+    """
+    if not ticker_decimals:
+        return {}
+
+    from services.yf_limiter import throttled
+
+    tickers = list(ticker_decimals.keys())
+    out: dict[str, dict] = {}
+
+    try:
+        data = throttled(
+            yf.download,
+            tickers,
+            period="5d",
+            interval="1d",
+            group_by="ticker",
+            progress=False,
+            threads=True,
+            auto_adjust=False,
+        )
+    except Exception as e:
+        logger.warning("매크로 batch download 실패 — ticker 별 폴백: %s", e)
+        # batch 실패 시 ticker 별 fast_info 폴백
+        for ticker, decimals in ticker_decimals.items():
+            out[ticker] = _fetch_macro_value(ticker, decimals)
+        return out
+
+    if data is None or data.empty:
+        # batch 결과가 비어있으면 ticker 별 폴백
+        for ticker, decimals in ticker_decimals.items():
+            out[ticker] = _fetch_macro_value(ticker, decimals)
+        return out
+
+    is_single = len(tickers) == 1
+
+    for ticker, decimals in ticker_decimals.items():
+        try:
+            if is_single:
+                ticker_data = data
+            else:
+                if isinstance(data.columns, pd.MultiIndex):
+                    level0 = data.columns.get_level_values(0)
+                    if ticker not in set(level0):
+                        out[ticker] = _fetch_macro_value(ticker, decimals)
+                        continue
+                ticker_data = data[ticker]
+
+            close_series = ticker_data["Close"].dropna()
+            if close_series.empty:
+                out[ticker] = _fetch_macro_value(ticker, decimals)
+                continue
+
+            price = float(close_series.iloc[-1])
+            if not math.isfinite(price):
+                out[ticker] = _fetch_macro_value(ticker, decimals)
+                continue
+
+            value = round(price, decimals)
+            change = None
+            pct = None
+            if len(close_series) >= 2:
+                prev_close = float(close_series.iloc[-2])
+                if math.isfinite(prev_close) and prev_close != 0:
+                    raw_change = price - prev_close
+                    change = round(raw_change, decimals)
+                    pct = round(raw_change / prev_close, 4)
+
+            result = {"value": value, "change": change, "pct": pct, "stale": False}
+            _macro_value_cache[ticker] = result
+            out[ticker] = result
+        except Exception as e:
+            logger.debug("매크로 batch parse 실패 (%s): %s — ticker 별 폴백", ticker, e)
+            out[ticker] = _fetch_macro_value(ticker, decimals)
+
+    return out
+
+
 def fetch_macro_indicators() -> dict:
     """
     yfinance로 글로벌 매크로 지표를 수집하여 marquee/sidebar 구조로 반환한다.
-    """
-    seen: dict[str, dict] = {}
-    result: dict = {"marquee": [], "sidebar": []}
 
+    Hot path: 1분 주기 macro loop 에서 호출. 14개 ticker 를 1회 yf.download batch 로
+    묶어 호출 비용을 14배 줄였다.
+    """
+    # 모든 unique ticker 와 decimals 매핑
+    ticker_decimals: dict[str, int] = {}
+    for group_def in (MACRO_MARQUEE, MACRO_SIDEBAR):
+        for ind in group_def:
+            ticker_decimals.setdefault(ind["ticker"], ind["decimals"])
+
+    fetched = _fetch_macro_values_batch(ticker_decimals)
+
+    result: dict = {"marquee": [], "sidebar": []}
     for group_def, key in [(MACRO_MARQUEE, "marquee"), (MACRO_SIDEBAR, "sidebar")]:
         for ind in group_def:
-            ticker = ind["ticker"]
-            decimals = ind["decimals"]
-
-            if ticker not in seen:
-                seen[ticker] = _fetch_macro_value(ticker, decimals)
-
-            data = seen[ticker]
+            data = fetched.get(ind["ticker"]) or {"value": None, "change": None, "pct": None, "stale": False}
             result[key].append({
                 "name": ind["name"],
                 "value": data["value"],

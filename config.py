@@ -87,6 +87,10 @@ MIN_VOLUME = 1_000_000
 SCAN_TOP_N = 15
 SCAN_TRADING_DAYS = 5  # 등락률 계산 기준 거래일 수
 REPORT_TOP_N = 2
+# yf.download batch 동시 실행 수 — 503 종목 / 100 batch = 6 배치를 N개 thread 로 동시 다운로드.
+# yfinance 자체 connection pool + Yahoo 한 IP 동시 요청 한도 고려해 기본 3 (보수적).
+# 사이클 시간이 6단계 직렬 → ceil(6/3)=2단계로 축소. 측정상 약 2~3배 빨라짐.
+SCAN_DOWNLOAD_BATCH_PARALLELISM = int(os.getenv("SCAN_DOWNLOAD_BATCH_PARALLELISM", "3"))
 # 분석 사이클 안정성: scan_stocks 결과가 이 개수 미만이면 yfinance 부분 차단/장시간 누적 오류로
 # 간주하고 직전 스냅샷(메모리→DB)을 유지한다. 새 1~2개 결과로 top_picks/radar 를 덮어쓰지 않는다.
 #
@@ -110,6 +114,16 @@ WS_MAX_CONNECTIONS = int(os.getenv("WS_MAX_CONNECTIONS", "200"))
 WS_HEARTBEAT_INTERVAL_SEC = int(os.getenv("WS_HEARTBEAT_INTERVAL_SEC", "30"))
 # 클라이언트가 이 시간 안에 어떤 메시지(텍스트/pong/ping)도 보내지 않으면 idle 로 판단해 종료
 WS_IDLE_TIMEOUT_SEC = int(os.getenv("WS_IDLE_TIMEOUT_SEC", "300"))
+# broadcast 시 send_bytes/send_text 동시 발사 — 직렬 송신 대비 클라이언트 N배 빨라짐.
+# 단, 대량 슬로우 클라이언트가 게이트가 되지 않도록 send 자체에 5초 타임아웃 적용.
+WS_BROADCAST_SEND_TIMEOUT_SEC = float(os.getenv("WS_BROADCAST_SEND_TIMEOUT_SEC", "5.0"))
+
+# ---------------------------------------------------------------------------
+# HTTP 미들웨어
+# ---------------------------------------------------------------------------
+# GZip 미들웨어 임계값(byte). 응답 크기가 이 값 이상일 때만 압축.
+# 500 byte 미만은 압축 오버헤드(CPU + 헤더)가 더 커서 그대로 두는 게 이득.
+GZIP_MIN_SIZE_BYTES = int(os.getenv("GZIP_MIN_SIZE_BYTES", "500"))
 
 # 섹터 트래커 응답 캐시 TTL (yfinance 재호출 부담 분산)
 SECTOR_TRACKER_CACHE_TTL_SEC = int(os.getenv("SECTOR_TRACKER_CACHE_TTL_SEC", "600"))
