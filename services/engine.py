@@ -26,6 +26,7 @@ from services.scanner import (
     get_market_gauge,
     refresh_intraday_prices,
     merge_intraday_into_candidates,
+    backfill_missing_returns,
     ensure_sp500_coverage,
 )
 from services.sentiment import analyze_sentiments
@@ -284,6 +285,22 @@ async def run_price_tick_loop():
             if live:
                 merge_intraday_into_candidates(latest_cache.get("top_picks") or [], live)
                 merge_intraday_into_candidates(latest_cache.get("radar") or [], live)
+
+                # _preserve_or_restore_snapshot 으로 placeholder(daily=[])가 남은 종목들의
+                # 5일 등락률을 price_history DB 에서 batch 보강한다.
+                # DB 캐시 hit 이면 yfinance 추가 호출 없이 즉시 채워짐.
+                filled_top = await asyncio.to_thread(
+                    backfill_missing_returns, latest_cache.get("top_picks") or [],
+                )
+                filled_radar = await asyncio.to_thread(
+                    backfill_missing_returns, latest_cache.get("radar") or [],
+                )
+                if filled_top + filled_radar:
+                    logger.info(
+                        "5일 등락률 backfill: %d개 종목 보강 (top=%d radar=%d)",
+                        filled_top + filled_radar, filled_top, filled_radar,
+                    )
+
                 latest_cache["quote_tick_at"] = datetime.now().isoformat()
                 latest_cache["updated_at"] = datetime.now().isoformat()
                 await manager.broadcast({"type": "MARKET_UPDATE", **sanitize_for_json(latest_cache)})

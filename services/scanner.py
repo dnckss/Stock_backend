@@ -4,7 +4,7 @@ import logging
 import math
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import StringIO
 from typing import Any
 
@@ -556,6 +556,70 @@ def merge_intraday_into_candidates(candidates: list[dict], live: dict[str, dict]
         except Exception:
             # return 재계산 실패는 무시하고 기존 값을 유지한다.
             pass
+
+
+def backfill_missing_returns(candidates: list[dict]) -> int:
+    """
+    return 이 비어있고 price 가 있는 종목들에 대해, price_history DB 에서
+    SCAN_TRADING_DAYS 거래일 전 종가를 가져와 5일 등락률을 채운다.
+
+    ``_preserve_or_restore_snapshot`` 으로 placeholder(daily=[]) 가 유지되는 경우,
+    `merge_intraday_into_candidates` 는 daily 가 비어있어 return 재계산을 skip 한다.
+    이 함수가 다음 price tick 사이클에서 DB 데이터로 5D RETURN 컬럼의 누락을 메운다.
+
+    Returns:
+        backfill 된 종목 수.
+    """
+    if not candidates:
+        return 0
+
+    missing = [
+        c for c in candidates
+        if c.get("return") is None and c.get("price") is not None
+    ]
+    if not missing:
+        return 0
+
+    # price_history 조회 — yfinance 직접 호출은 fetch_close_prices 가 알아서 처리.
+    tickers = sorted({(c.get("ticker") or "").upper().strip() for c in missing if c.get("ticker")})
+    if not tickers:
+        return 0
+
+    # 영업일 5일 + 주말/공휴일 여유 (BACKTEST_PRICE_LOOKAHEAD_DAYS 정의 안 가져옴 — 14일 직접)
+    end = datetime.now().date()
+    start = end - timedelta(days=14)
+
+    try:
+        from services.price_store import fetch_close_prices
+        close_df = fetch_close_prices(tickers, start, end)
+    except Exception as e:
+        logger.warning("backfill_missing_returns: fetch_close_prices 실패: %s", e)
+        return 0
+
+    if close_df is None or close_df.empty:
+        return 0
+
+    filled = 0
+    for c in missing:
+        try:
+            t = (c.get("ticker") or "").upper().strip()
+            if t not in close_df.columns:
+                continue
+            series = close_df[t].dropna()
+            if len(series) < 2:
+                continue
+            # SCAN_TRADING_DAYS=5 일 전 close. 부족하면 가장 오래된 점 사용.
+            base_idx = min(SCAN_TRADING_DAYS, len(series))
+            base = float(series.iloc[-base_idx])
+            now_px = float(c["price"])
+            if not (math.isfinite(base) and math.isfinite(now_px)) or base == 0:
+                continue
+            c["return"] = round((now_px - base) / base, 6)
+            filled += 1
+        except Exception:
+            continue
+
+    return filled
 
 
 # ---------------------------------------------------------------------------
