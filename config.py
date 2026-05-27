@@ -99,6 +99,14 @@ SCAN_DOWNLOAD_BATCH_PARALLELISM = int(os.getenv("SCAN_DOWNLOAD_BATCH_PARALLELISM
 # 사용자 화면이 갑자기 줄지 않게 한다.
 MIN_TOP_PICKS_FRESH = int(os.getenv("MIN_TOP_PICKS_FRESH", "250"))
 
+# 스캔 1차 누락 티커 재시도 — yfinance 부분 차단/429 로 batch 가 통째로 실패하면
+# 해당 종목은 price/volume=None placeholder 로 남아 대시보드에서 VOL·거래대금이 빈칸이 된다.
+# 누락분만 throttled(글로벌 rate limit 경유) 작은 batch 로 재시도해 커버리지를 끌어올린다.
+#   ROUNDS=0 이면 재시도 비활성. rate limit 분산을 위해 라운드 사이 DELAY 만큼 대기.
+SCAN_RETRY_MAX_ROUNDS = int(os.getenv("SCAN_RETRY_MAX_ROUNDS", "2"))
+SCAN_RETRY_BATCH_SIZE = int(os.getenv("SCAN_RETRY_BATCH_SIZE", "40"))
+SCAN_RETRY_DELAY_SEC = float(os.getenv("SCAN_RETRY_DELAY_SEC", "1.5"))
+
 # Cycle
 SCAN_INTERVAL_SEC = 3600
 ERROR_RETRY_SEC = 60

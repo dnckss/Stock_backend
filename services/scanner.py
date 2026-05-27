@@ -17,6 +17,9 @@ from config import (
     SCAN_TOP_N,
     SCAN_TRADING_DAYS,
     SCAN_DOWNLOAD_BATCH_PARALLELISM,
+    SCAN_RETRY_MAX_ROUNDS,
+    SCAN_RETRY_BATCH_SIZE,
+    SCAN_RETRY_DELAY_SEC,
     MACRO_MARQUEE,
     MACRO_SIDEBAR,
     MACRO_FALLBACK,
@@ -181,19 +184,32 @@ def _compute_return(ohlc: pd.DataFrame) -> float | None:
     return (last_close - first_open) / first_open
 
 
-def _download_batch(batch: list[str]) -> pd.DataFrame | None:
-    """yf.download 1회 — 예외/빈 결과는 None 반환."""
+def _yf_download_daily(batch: list[str]) -> pd.DataFrame | None:
+    """스캔용 일봉 10일 다운로드 단일 호출 지점 (파라미터 SSOT)."""
+    return yf.download(
+        batch,
+        period="10d",
+        interval="1d",
+        group_by="ticker",
+        progress=False,
+        threads=True,
+    )
+
+
+def _download_batch(batch: list[str], *, throttle: bool = False) -> pd.DataFrame | None:
+    """yf.download 1회 — 예외/빈 결과는 None 반환.
+
+    throttle=True 면 글로벌 rate limit(throttled)을 경유해 429 자동 백오프를 적용한다.
+    1차 스캔은 자체 ThreadPoolExecutor 병렬이라 throttle 없이, 누락 재시도만 throttle 로 호출한다.
+    """
     if not batch:
         return None
     try:
-        data = yf.download(
-            batch,
-            period="10d",
-            interval="1d",
-            group_by="ticker",
-            progress=False,
-            threads=True,
-        )
+        if throttle:
+            from services.yf_limiter import throttled
+            data = throttled(_yf_download_daily, batch)
+        else:
+            data = _yf_download_daily(batch)
     except Exception as e:
         logger.warning("yf.download batch (size=%d) 실패: %s", len(batch), e)
         return None
@@ -278,6 +294,76 @@ def _parse_batch_candidates(data: pd.DataFrame, batch: list[str]) -> list[dict]:
     return out
 
 
+def count_priced(candidates: list[dict]) -> int:
+    """가격이 확보된(placeholder 가 아닌) 종목 수. stale 판정·로깅 공용 단일 출처."""
+    return sum(
+        1 for c in candidates
+        if isinstance(c, dict) and c.get("price") is not None
+    )
+
+
+def _missing_tickers(candidates: list[dict], tickers: list[str]) -> list[str]:
+    """1차 스캔에서 candidate 로 추출되지 못한(placeholder 가 될) 티커 목록."""
+    present = {(c.get("ticker") or "").upper() for c in candidates}
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in tickers:
+        key = (t or "").upper().strip()
+        if key and key not in present and key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def _retry_missing_candidates(candidates: list[dict], tickers: list[str]) -> int:
+    """1차 스캔 누락 티커를 throttled 작은 batch 로 재시도해 candidates 에 제자리 보강한다.
+
+    yfinance 부분 차단으로 batch 가 통째로 실패한 종목을 되살려 VOL·거래대금 커버리지를 높인다.
+    보강된 종목 수를 반환한다. ``SCAN_RETRY_MAX_ROUNDS<=0`` 이면 비활성.
+    """
+    if SCAN_RETRY_MAX_ROUNDS <= 0:
+        return 0
+
+    missing = _missing_tickers(candidates, tickers)
+    if not missing:
+        return 0
+
+    retry_batch = max(1, SCAN_RETRY_BATCH_SIZE)
+    recovered_total = 0
+
+    for round_no in range(1, SCAN_RETRY_MAX_ROUNDS + 1):
+        if not missing:
+            break
+        if SCAN_RETRY_DELAY_SEC > 0:
+            time.sleep(SCAN_RETRY_DELAY_SEC)  # rate limit 분산
+
+        still_missing: list[str] = []
+        recovered_round = 0
+        for i in range(0, len(missing), retry_batch):
+            batch = missing[i : i + retry_batch]
+            data = _download_batch(batch, throttle=True)
+            if data is None:
+                still_missing.extend(batch)
+                continue
+            parsed = _parse_batch_candidates(data, batch)
+            got = {(c.get("ticker") or "").upper() for c in parsed}
+            candidates.extend(parsed)
+            recovered_round += len(parsed)
+            still_missing.extend(t for t in batch if t not in got)
+
+        recovered_total += recovered_round
+        logger.info(
+            "스캔 재시도 R%d/%d: %d개 보강, 잔여 %d개",
+            round_no, SCAN_RETRY_MAX_ROUNDS, recovered_round, len(still_missing),
+        )
+        missing = still_missing
+        # 한 라운드 전체가 0건이면 추가 라운드도 가망 없음(429는 throttled 내부에서 이미 재시도) — 조기 종료.
+        if recovered_round == 0:
+            break
+
+    return recovered_total
+
+
 def scan_stocks(tickers: list[str]) -> list[dict]:
     """
     yf.download()로 10캘린더일(≥5거래일)치 종가·거래량을 배치 조회하고,
@@ -324,6 +410,9 @@ def scan_stocks(tickers: list[str]) -> list[dict]:
                     continue
                 candidates.extend(_parse_batch_candidates(data, batch))
 
+    # 1차 스캔 누락분(batch 실패)을 throttled 재시도로 보강 — VOL·거래대금 커버리지 향상.
+    _retry_missing_candidates(candidates, tickers)
+
     # 누락 ticker 는 placeholder 보강 (가격 틱 루프가 추후 채움).
     present = {(c.get("ticker") or "").upper() for c in candidates}
     for ticker in tickers:
@@ -343,7 +432,7 @@ def scan_stocks(tickers: list[str]) -> list[dict]:
             return -1.0
 
     candidates.sort(key=_sort_return, reverse=True)
-    priced_count = sum(1 for c in candidates if c.get("price") is not None)
+    priced_count = count_priced(candidates)
     logger.info("스캔 결과: %d/%d개 가격 확보 (batch=%d, workers=%d)",
                 priced_count, len(candidates), len(batches), workers)
     return candidates

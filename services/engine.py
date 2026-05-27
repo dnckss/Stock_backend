@@ -22,6 +22,7 @@ from config import (
 from services.scanner import (
     get_all_tickers,
     scan_stocks,
+    count_priced,
     fetch_macro_indicators,
     get_market_gauge,
     refresh_intraday_prices,
@@ -139,12 +140,16 @@ async def run_analysis_loop():
             logger.info("스캔 엔진 가동: %s", start.strftime("%H:%M:%S"))
 
             candidates = await asyncio.to_thread(scan_stocks, tickers)
-            # 장시간 운용 중 yfinance 일시 차단/배치 실패가 누적되면 candidates 가
-            # 1~2개로 줄어들 수 있다. 이 경우 직전 스냅샷을 유지해 대시보드가
-            # "갑자기 1개"로 보이는 현상을 방지한다.
-            if len(candidates) < MIN_TOP_PICKS_FRESH:
+            # 장시간 운용 중 yfinance 일시 차단/배치 실패가 누적되면 실제 가격 확보 종목이
+            # 급감할 수 있다. scan_stocks 는 S&P 500 전체를 placeholder 로 패딩해 반환하므로
+            # len(candidates)(≈503)이 아니라 가격이 실제로 채워진 종목 수(count_priced)로
+            # 판정해야 한다. 부실 스캔이면 직전 스냅샷을 유지해 VOL·거래대금이 대량으로
+            # 빈칸이 되는 현상을 방지한다.
+            priced = count_priced(candidates)
+            if priced < MIN_TOP_PICKS_FRESH:
                 reason = (
-                    f"유효 종목 {len(candidates)}개 (< MIN_TOP_PICKS_FRESH={MIN_TOP_PICKS_FRESH})"
+                    f"유효 가격 종목 {priced}/{len(candidates)}개 "
+                    f"(< MIN_TOP_PICKS_FRESH={MIN_TOP_PICKS_FRESH})"
                 )
                 logger.warning("%s — 직전 스냅샷 유지/복원, 다음 사이클 대기", reason)
                 await _preserve_or_restore_snapshot(reason)
