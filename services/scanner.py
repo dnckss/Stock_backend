@@ -30,6 +30,7 @@ from config import (
     PRICE_INTRADAY_INTERVAL,
     SP500_WIKI_URL,
     SP500_WIKI_HEADERS,
+    SP500_WIKI_TIMEOUT_SEC,
     SP500_CONSTITUENTS_CACHE_TTL_SEC,
 )
 
@@ -61,7 +62,7 @@ def get_sp500_constituents(refresh: bool = False) -> list[dict[str, str]]:
         return [dict(row) for row in _sp500_constituents_cache]
 
     try:
-        resp = requests.get(SP500_WIKI_URL, headers=SP500_WIKI_HEADERS, timeout=15)
+        resp = requests.get(SP500_WIKI_URL, headers=SP500_WIKI_HEADERS, timeout=SP500_WIKI_TIMEOUT_SEC)
         resp.raise_for_status()
         df = pd.read_html(StringIO(resp.text))[0]
         rows: list[dict[str, str]] = []
@@ -71,16 +72,16 @@ def get_sp500_constituents(refresh: bool = False) -> list[dict[str, str]]:
             sector = str(row.get("GICS Sector", "")).strip()
             if ticker and sector:
                 rows.append({"ticker": ticker, "name": name, "sector": sector})
-        print(f"S&P 500 구성종목 {len(rows)}개 수집 완료")
+        logger.info("S&P 500 구성종목 %d개 수집 완료", len(rows))
         _sp500_constituents_cache = rows
         _sp500_constituents_cache_at = now
         return [dict(row) for row in rows]
     except requests.RequestException as e:
-        print(f"Wikipedia 네트워크 에러: {e}")
+        logger.warning("Wikipedia 네트워크 에러: %s", e)
     except (ValueError, KeyError) as e:
-        print(f"Wikipedia 파싱 에러: {e}")
+        logger.warning("Wikipedia 파싱 에러: %s", e)
     except Exception as e:
-        print(f"티커 수집 실패: {e}")
+        logger.warning("티커 수집 실패: %s", e)
     return []
 
 

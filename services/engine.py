@@ -37,6 +37,7 @@ from services.crud import get_latest_scan_records, save_candidates, sanitize_for
 from services.news_feed import build_news_feed
 from services.price_store import backfill_recent
 from services.websocket import manager, latest_cache
+from services.utils import spawn_logged
 
 logger = logging.getLogger(__name__)
 
@@ -362,7 +363,7 @@ async def run_news_feed_loop():
 
             # 백그라운드 본문 프리페치 — 사용자 클릭 시 즉시 응답 가능하도록
             from services.news_feed import prefetch_news_articles
-            asyncio.create_task(prefetch_news_articles(feed))
+            spawn_logged(prefetch_news_articles(feed), name="prefetch_news_articles")
             failures = 0
             await asyncio.sleep(NEWS_FEED_INTERVAL_SEC)
         except asyncio.CancelledError:

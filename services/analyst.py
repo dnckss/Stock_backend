@@ -12,10 +12,10 @@
 """
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
 
-from openai import OpenAI
 from config import (
     OPENAI_API_KEY,
     OPENAI_MODEL,
@@ -29,8 +29,11 @@ from config import (
     EARNINGS_SELL_PCT,
     REPORT_TOP_N,
 )
+from services.utils import make_openai_client
 
-_client = OpenAI(api_key=OPENAI_API_KEY)
+logger = logging.getLogger(__name__)
+
+_client = make_openai_client()
 
 _SYSTEM_PROMPT = (
     "너는 월스트리트 탑 헤지펀드의 수석 퀀트 애널리스트야. "
@@ -302,7 +305,7 @@ def generate_reports(candidates: list) -> list:
             resp = _client.chat.completions.create(**kwargs)
             target["report"] = resp.choices[0].message.content
         except Exception as e:
-            print(f"리포트 생성 실패 ({target['ticker']}): {e}")
+            logger.warning("리포트 생성 실패 (%s): %s", target.get("ticker"), e)
             target["report"] = None
 
     return candidates

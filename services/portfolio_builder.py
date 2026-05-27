@@ -11,23 +11,19 @@ import math
 from datetime import datetime
 from typing import Any
 
-from openai import OpenAI
-
 from config import (
     OPENAI_API_KEY,
+    PORTFOLIO_BUILDER_TIMEOUT_SEC,
     STRATEGIST_OPENAI_MODEL,
 )
+from services.utils import make_openai_client
 from services.crud import sanitize_for_json
 from services.portfolio_agents import STYLE_CONFIG, PERIOD_CONFIG, _DEFENSIVE_ETFS
 from services.stock_detail import fetch_quote
 
 logger = logging.getLogger(__name__)
 
-_client = OpenAI(
-    api_key=OPENAI_API_KEY,
-    max_retries=2,
-    timeout=600,
-) if OPENAI_API_KEY else None
+_client = make_openai_client(timeout=PORTFOLIO_BUILDER_TIMEOUT_SEC)
 
 # 단일 소스: portfolio_agents.py에서 import
 _STYLE_CONFIG = STYLE_CONFIG

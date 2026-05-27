@@ -9,9 +9,13 @@ import httpx
 from bs4 import BeautifulSoup
 
 from config import (
+    BROWSER_HEADERS,
     ECON_CALENDAR_MAX_ITEMS,
     ECON_CALENDAR_TIMEOUT_SEC,
     ECON_CALENDAR_TTL_SEC,
+    ECON_FOREXFACTORY_URL,
+    ECON_MYFXBOOK_URL,
+    KST,
 )
 from services.crud import upsert_economic_events, get_economic_events
 
@@ -20,19 +24,12 @@ logger = logging.getLogger(__name__)
 _cache: list[dict[str, Any]] = []
 _cache_at: datetime | None = None
 
-_KST = timezone(timedelta(hours=9))
+_KST = KST
 
-_MYFXBOOK_URL = "https://www.myfxbook.com/forex-economic-calendar"
-# ForexFactory 공개 JSON — myfxbook 차단(403) 시 fallback. 이번주 7일치 제공.
-_FOREXFACTORY_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+_MYFXBOOK_URL = ECON_MYFXBOOK_URL
+_FOREXFACTORY_URL = ECON_FOREXFACTORY_URL
 
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/123.0.0.0 Safari/537.36"
-    ),
-}
+_HEADERS = BROWSER_HEADERS
 
 _FF_IMPACT_MAP = {
     "high": 3,

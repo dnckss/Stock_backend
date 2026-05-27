@@ -10,19 +10,18 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from openai import OpenAI
-
 from config import (
     OPENAI_API_KEY,
     STRATEGIST_OPENAI_MODEL,
     STRATEGIST_OPENAI_TIMEOUT_SEC,
     STRATEGIST_OPENAI_THREAD_BUFFER_SEC,
 )
+from services.utils import make_openai_client
 from services.crud import sanitize_for_json, _get_client, _sanitize
 
 logger = logging.getLogger(__name__)
 
-_ai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+_ai_client = make_openai_client()
 
 # 프로세스 내 캐시 (이벤트명 기준 — 같은 지표는 매번 AI 호출 불필요)
 _detail_cache: dict[str, dict[str, Any]] = {}

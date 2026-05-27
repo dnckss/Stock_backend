@@ -121,8 +121,9 @@ async def build_news_feed(tickers: list[str]) -> list[dict[str, Any]]:
     target_tickers = tickers[:15]
 
     def _fetch_one(tk: str) -> tuple[str, list]:
+        from services.yf_limiter import throttled
         try:
-            return tk, yf.Ticker(tk).get_news(count=5) or []
+            return tk, throttled(lambda _tk=tk: yf.Ticker(_tk).get_news(count=5)) or []
         except Exception as e:
             logger.debug("뉴스 수집 실패 (%s): %s", tk, e)
             return tk, []

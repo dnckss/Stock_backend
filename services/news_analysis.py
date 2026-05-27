@@ -6,9 +6,10 @@ import logging
 import re
 from typing import Any
 
-from openai import BadRequestError, OpenAI
+from openai import BadRequestError
 
 from services.news_sentiment import add_normalized_impact_fields
+from services.utils import make_openai_client
 from config import (
     OPENAI_API_KEY,
     NEWS_ANALYSIS_FALLBACK_OPENAI_MODEL,
@@ -21,7 +22,7 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
-_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+_client = make_openai_client()
 
 # JSON mode 사용 시 OpenAI는 대화에 "JSON으로 출력" 지시가 있어야 하는 경우가 많다.
 _SYSTEM = (

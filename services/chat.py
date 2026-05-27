@@ -28,7 +28,7 @@ import time
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from openai import OpenAI
+from services.utils import make_openai_client
 
 from config import (
     CHAT_KO_NAME_TO_TICKER,
@@ -56,11 +56,7 @@ from services.websocket import latest_cache
 
 logger = logging.getLogger(__name__)
 
-_client = OpenAI(
-    api_key=OPENAI_API_KEY,
-    max_retries=2,
-    timeout=CHAT_OPENAI_TIMEOUT_SEC,
-) if OPENAI_API_KEY else None
+_client = make_openai_client(timeout=CHAT_OPENAI_TIMEOUT_SEC)
 
 
 # ---------------------------------------------------------------------------

@@ -8,6 +8,9 @@ import httpx
 from bs4 import BeautifulSoup
 
 from config import (
+    BROWSER_HEADERS,
+    FINVIZ_QUOTE_URL,
+    FINVIZ_TIMEOUT_SEC,
     SENTIMENT_FINVIZ_DELAY_SEC,
     SENTIMENT_FINVIZ_MAX_CONCURRENT,
     SENTIMENT_FINVIZ_MAX_RETRIES,
@@ -20,8 +23,8 @@ logger = logging.getLogger(__name__)
 
 # Finviz 가 2026년 quote.ashx → quote 로 영구 리다이렉트(301).
 # 새 URL 을 직접 사용해 redirect 비용을 피하고, 만약을 위해 client 에서도 follow_redirects=True 로 안전망.
-_FINVIZ_BASE = "https://finviz.com/quote?t={}"
-_FINVIZ_HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+_FINVIZ_BASE = FINVIZ_QUOTE_URL
+_FINVIZ_HEADERS = BROWSER_HEADERS
 
 # Finviz 동시 연결 수를 httpx 레벨에서도 제한
 _HTTP_LIMITS = httpx.Limits(
@@ -52,7 +55,7 @@ async def _scrape_headlines(client: httpx.AsyncClient, ticker: str) -> list[str]
     url = _FINVIZ_BASE.format(ticker)
     for attempt in range(SENTIMENT_FINVIZ_MAX_RETRIES):
         try:
-            resp = await client.get(url, headers=_FINVIZ_HEADERS, timeout=httpx.Timeout(15.0))
+            resp = await client.get(url, headers=_FINVIZ_HEADERS, timeout=httpx.Timeout(FINVIZ_TIMEOUT_SEC))
 
             if resp.status_code == 429:
                 retry_after = resp.headers.get("Retry-After")

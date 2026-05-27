@@ -12,9 +12,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import yfinance as yf
-from openai import OpenAI
+from services.utils import make_openai_client
 
 from config import (
+    KST,
     OPENAI_API_KEY,
     STRATEGIST_CACHE_TTL_SEC,
     STRATEGIST_DIVERGENCE_FALLBACK,
@@ -46,13 +47,7 @@ from services.crud import get_economic_events, get_latest_scan_records, sanitize
 
 logger = logging.getLogger(__name__)
 
-_client = OpenAI(
-    api_key=OPENAI_API_KEY,
-    max_retries=2,
-    # httpx 레이어 timeout. STRATEGIST_OPENAI_TIMEOUT_SEC 가 단일 진실의 원천.
-    # 응답 지연이 누적되어 캐시 TTL(5분)을 넘기는 현상을 방지하기 위해 짧게 둔다.
-    timeout=STRATEGIST_OPENAI_TIMEOUT_SEC,
-) if OPENAI_API_KEY else None
+_client = make_openai_client(timeout=STRATEGIST_OPENAI_TIMEOUT_SEC)
 
 
 def _is_reasoning_model(model: str | None) -> bool:
@@ -60,7 +55,7 @@ def _is_reasoning_model(model: str | None) -> bool:
     name = (model or "").lower()
     return "gpt-5" in name or "o1" in name or "o3" in name
 
-_KST = timezone(timedelta(hours=9))
+_KST = KST
 
 # ---------------------------------------------------------------------------
 # System Prompt

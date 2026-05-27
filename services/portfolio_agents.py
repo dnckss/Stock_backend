@@ -22,7 +22,7 @@ from collections.abc import AsyncGenerator
 from datetime import datetime
 from typing import Any
 
-from openai import OpenAI
+from services.utils import make_openai_client
 
 from config import (
     OPENAI_API_KEY,
@@ -37,11 +37,7 @@ from services.stock_detail import fetch_quote
 
 logger = logging.getLogger(__name__)
 
-_client = OpenAI(
-    api_key=OPENAI_API_KEY,
-    max_retries=2,
-    timeout=PORTFOLIO_AGENT_TIMEOUT_SEC,
-) if OPENAI_API_KEY else None
+_client = make_openai_client(timeout=PORTFOLIO_AGENT_TIMEOUT_SEC)
 
 
 # ---------------------------------------------------------------------------

@@ -21,6 +21,7 @@ from config import (
     FINBERT_OPENAI_TIMEOUT_SEC,
     OPENAI_API_KEY,
 )
+from services.utils import make_openai_client
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +76,7 @@ def _get_openai_client():
     if not OPENAI_API_KEY:
         return None
     try:
-        from openai import OpenAI
-        _openai_client = OpenAI(api_key=OPENAI_API_KEY, timeout=FINBERT_OPENAI_TIMEOUT_SEC)
+        _openai_client = make_openai_client(timeout=FINBERT_OPENAI_TIMEOUT_SEC)
         return _openai_client
     except Exception as e:
         logger.warning("OpenAI 클라이언트 초기화 실패 — neutral 폴백: %s", e)

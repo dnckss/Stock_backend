@@ -70,6 +70,7 @@ from services.engine import (
     run_price_tick_loop,
 )
 from services.websocket import manager, latest_cache
+from services.utils import spawn_logged
 from services.scanner import fetch_macro_indicators, get_market_gauge
 from services.news_feed import build_news_feed
 from routers import market, stock
@@ -117,7 +118,7 @@ async def _seed_initial_caches():
         feed = await build_news_feed(NEWS_FALLBACK_TICKERS)
         latest_cache["news_feed"] = feed
         latest_cache["updated_at"] = datetime.now().isoformat()
-        asyncio.create_task(prefetch_news_articles(feed))
+        spawn_logged(prefetch_news_articles(feed), name="prefetch_news_articles")
     except Exception as e:
         logger.warning("기동 시 뉴스 수집 실패: %s", e, exc_info=True)
 

@@ -1,27 +1,86 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import re
+import socket
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
 
-from config import NEWS_ARTICLE_MAX_CHARS, NEWS_CRAWL_MAX_CONCURRENT, NEWS_CRAWL_TIMEOUT_SEC
+from config import (
+    BROWSER_HEADERS,
+    NEWS_ARTICLE_MAX_CHARS,
+    NEWS_CRAWL_ALLOWED_SCHEMES,
+    NEWS_CRAWL_BLOCK_PRIVATE_IPS,
+    NEWS_CRAWL_MAX_CONCURRENT,
+    NEWS_CRAWL_MAX_REDIRECTS,
+    NEWS_CRAWL_TIMEOUT_SEC,
+)
 
 logger = logging.getLogger(__name__)
 
 _semaphore = asyncio.Semaphore(max(1, NEWS_CRAWL_MAX_CONCURRENT))
 
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
-    )
-}
+_HEADERS = BROWSER_HEADERS
+
+
+class UnsafeURLError(Exception):
+    """SSRF 방어 — 허용되지 않은 스킴/대상(사설·내부 IP) URL."""
+
+
+async def _validate_public_url(url: str) -> None:
+    """http(s) 스킴 + 공인 IP 만 허용한다. 위반 시 UnsafeURLError.
+
+    호스트를 DNS 조회해 모든 결과 IP 가 공인인지 확인한다(사설/루프백/링크로컬/예약/멀티캐스트 거부).
+    DNS 조회는 이벤트 루프를 막지 않도록 loop.getaddrinfo 로 비동기 수행한다.
+    (주: 검증 후 httpx 가 재조회하므로 DNS rebinding 에 대한 완전 방어는 아니며, 일반적 SSRF 차단 목적.)
+    """
+    parsed = urlparse(url)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in NEWS_CRAWL_ALLOWED_SCHEMES:
+        raise UnsafeURLError(f"허용되지 않은 스킴: {scheme or '(none)'}")
+    host = parsed.hostname
+    if not host:
+        raise UnsafeURLError("호스트 없음")
+    if not NEWS_CRAWL_BLOCK_PRIVATE_IPS:
+        return
+    port = parsed.port or (443 if scheme == "https" else 80)
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await loop.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as e:
+        raise UnsafeURLError(f"DNS 조회 실패: {host}") from e
+    for info in infos:
+        ip_raw = info[4][0]
+        try:
+            ip = ipaddress.ip_address(ip_raw)
+        except ValueError as e:
+            raise UnsafeURLError(f"IP 파싱 실패: {ip_raw}") from e
+        if (
+            ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+        ):
+            raise UnsafeURLError(f"사설/내부 IP 차단: {host} -> {ip_raw}")
+
+
+async def _safe_fetch(client: httpx.AsyncClient, url: str) -> httpx.Response:
+    """SSRF 방어 — 매 홉마다 URL 을 검증하며 수동으로 리디렉션을 따라간다."""
+    current = url
+    for _ in range(NEWS_CRAWL_MAX_REDIRECTS + 1):
+        await _validate_public_url(current)
+        resp = await client.get(current)
+        if resp.is_redirect:
+            location = resp.headers.get("location")
+            if not location:
+                return resp
+            current = urljoin(current, location)
+            continue
+        return resp
+    raise UnsafeURLError(f"리디렉션 {NEWS_CRAWL_MAX_REDIRECTS}회 초과")
 
 _STRIP_TOKENS = ("HTML_TAG_START", "HTML_TAG_END")
 
@@ -340,8 +399,9 @@ async def fetch_and_extract(url: str) -> dict[str, Any]:
     async with _semaphore:
         try:
             timeout = httpx.Timeout(NEWS_CRAWL_TIMEOUT_SEC)
-            async with httpx.AsyncClient(follow_redirects=True, timeout=timeout, headers=_HEADERS) as client:
-                resp = await client.get(url)
+            # SSRF 방어: 자동 리디렉션을 끄고 _safe_fetch 가 매 홉을 검증하며 수동으로 따라간다.
+            async with httpx.AsyncClient(follow_redirects=False, timeout=timeout, headers=_HEADERS) as client:
+                resp = await _safe_fetch(client, url)
                 if resp.status_code != 200:
                     logger.warning("뉴스 크롤링 실패 HTTP %s: %s", resp.status_code, url)
                     return {
@@ -386,6 +446,25 @@ async def fetch_and_extract(url: str) -> dict[str, Any]:
                     "media": media,
                     "domains": {"article": _domain(str(resp.url)), "media": media_domains},
                 }
+        except UnsafeURLError as e:
+            # 사설/내부 IP·비허용 스킴 — 상세(IP 등)는 서버 로그에만, 클라이언트엔 일반 사유만.
+            logger.warning("SSRF 차단 — 안전하지 않은 URL: %s (%s)", e, url)
+            return {
+                "url": url,
+                "final_url": url,
+                "http_status": None,
+                "extraction_status": "blocked",
+                "error_reason": "unsafe_url",
+                "title": None,
+                "publisher": None,
+                "author": None,
+                "timestamp": None,
+                "canonical_url": None,
+                "article_text": "",
+                "article_markdown": "",
+                "media": [],
+                "domains": {"article": "", "media": []},
+            }
         except Exception as e:
             logger.warning("뉴스 크롤링 예외: %s (%s)", e, url)
             return {
