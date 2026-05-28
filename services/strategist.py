@@ -75,7 +75,7 @@ _SYSTEM_PROMPT = """\
 7. **technicals**: 후보 종목 기술적 지표 요약 (_meta.basis=daily, signal_summary + bias + 핵심 수치)
 
 ## 신호 우선순위 (충돌 시 상위가 하위를 override)
-1. **거시 리스크**: vix_regime이 elevated/extreme이거나 gauge_label이 공포/극도공포 → 방어적 해석 우선, 공격적 BUY 최소화
+1. **거시 리스크**: vix_regime이 elevated/extreme이거나 gauge_label이 공포/극도공포 → 방어적 해석 우선, 추천 종목 수를 줄이고 confidence를 낮춰라
 2. **고임팩트 경제 이벤트**: hours_until ≤ 24인 importance=3 이벤트 → 해당 이벤트 전 공격적 진입 자제, 이벤트 리스크 명시
 3. **섹터 ETF 모멘텀**: 실제 자금 흐름 반영 → 섹터 선택의 1차 근거
 4. **뉴스 감성**: dominant_sentiment과 분포 비율 기반 판단 — 단일 헤드라인에 의존 금지
@@ -93,8 +93,9 @@ _SYSTEM_PROMPT = """\
 - **market_regime**: 매크로 지표 + VIX + 섹터 ETF 흐름을 종합하여 시장 국면을 판단. market_regime_conviction(0.0~1.0)으로 확신도 표현.
 - **news_themes**: 뉴스에서 시장을 움직이는 핵심 테마 2~4개를 도출해.
 - **econ_analysis**: 경제 서프라이즈의 시장 영향 + 다가오는 리스크 이벤트를 분석해.
-- **recommendations**: 3~5개 종목 추천 (데이터 불충분 시 2개 이하 가능). 반드시 아래 규칙:
-  - **direction**(BUY/SELL), **confidence**(high/medium/low), **confidence_score**(0.0~1.0)
+- **recommendations**: 3~5개 **매수(BUY) 후보** 추천 (데이터 불충분 시 2개 이하 가능). 반드시 아래 규칙:
+  - **direction**: 항상 `"BUY"` — 이 전략실은 매수 후보만 제시한다. **SELL·숏 추천 금지.** 약세 국면이라 매수 후보가 마땅치 않으면 추천 수를 줄이거나 비우고 risk_warnings에 그 이유를 설명하라.
+  - **confidence**(high/medium/low), **confidence_score**(0.0~1.0)
   - **signal_drivers**: 이 추천을 뒷받침하는 데이터 소스 목록 (예: ["macd_bullish_cross", "sector_etf_up", "news_positive"])
   - **strategy_type**: scalp(당일) / swing(1~2주) / position(1개월+)
   - **entry_zone**: 진입 가격대 (low ~ high)
@@ -136,7 +137,7 @@ _SYSTEM_PROMPT = """\
   "recommendations": [
     {
       "ticker": "NVDA",
-      "direction": "BUY|SELL",
+      "direction": "BUY",
       "confidence": "high|medium|low",
       "confidence_score": 0.82,
       "signal_drivers": ["macd_bullish_cross", "sector_etf_up", "news_positive"],
@@ -667,6 +668,16 @@ def _validate_strategy_json(data: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(pick, dict) or not pick.get("ticker"):
             raise ValueError(f"recommendations[{i}] 구조 오류")
 
+    # 전략실은 매수(BUY) 후보만 노출·저장한다. 프롬프트로 BUY 만 생성하도록 했지만,
+    # 모델이 SELL/숏을 반환해도 여기서 방어적으로 제거하고 direction 을 BUY 로 정규화한다.
+    # (모두 SELL 이면 빈 리스트가 될 수 있으며, 이는 '매수 후보 없음'의 정상 상태다.)
+    buy_only: list[dict[str, Any]] = []
+    for rec in data["recommendations"]:
+        if (rec.get("direction") or "BUY").strip().upper() == "BUY":
+            rec["direction"] = "BUY"
+            buy_only.append(rec)
+    data["recommendations"] = buy_only
+
     # 선택적 키 기본값
     data.setdefault("market_regime", "unknown")
     data.setdefault("market_regime_conviction", 0.5)
@@ -966,10 +977,15 @@ def _fallback_response(rows: list[dict[str, Any]], sector_data: list[dict[str, A
     logger.warning("OpenAI 전략가 호출 실패, fallback: %s", exc, exc_info=True)
     top_sector_name = (sector_data[0].get("sector") if sector_data else "Unknown") or "Unknown"
     n = max(0, STRATEGIST_FALLBACK_TOP_PICKS_N)
+    # 전략실은 매수(BUY) 후보만 노출 — 스캔 signal 이 BUY 인 종목만 fallback 후보로 사용.
+    buy_rows = [
+        r for r in rows
+        if (r.get("ticker") or "").strip() and (r.get("signal") or "").upper() == "BUY"
+    ]
     recs = [
         {
             "ticker": (r.get("ticker") or "").upper(),
-            "direction": r.get("signal", "HOLD"),
+            "direction": "BUY",
             "confidence": "low",
             "strategy_type": "swing",
             "holding_period": "-",
@@ -977,7 +993,7 @@ def _fallback_response(rows: list[dict[str, Any]], sector_data: list[dict[str, A
             "risk_factors": "AI 분석 불가 상태",
             "technicals_summary": "-",
         }
-        for r in rows[:n] if (r.get("ticker") or "").strip()
+        for r in buy_rows[:n]
     ]
     return {
         "market_regime": "unknown",

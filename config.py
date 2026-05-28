@@ -454,24 +454,6 @@ HEATMAP_MIN_CONSTITUENTS_FOR_CACHE = int(os.getenv("HEATMAP_MIN_CONSTITUENTS_FOR
 MIN_VIX = 10.0
 MAX_VIX = 80.0
 
-# ---------------------------------------------------------------------------
-# Multi-Agent Portfolio Builder (SSE 스트리밍 + CoT)
-# ---------------------------------------------------------------------------
-# 포트폴리오·XAI 에이전트는 응답이 길어 reasoning 모델일수록 멈춘 것처럼 보임 → mini 기본
-PORTFOLIO_AGENT_MODEL = os.getenv("PORTFOLIO_AGENT_MODEL", "gpt-5-mini")
-# httpx 레벨 timeout. 600초는 5단계가 영원히 안 끝나는 체감을 만들어 240초로 단축.
-PORTFOLIO_AGENT_TIMEOUT_SEC = int(os.getenv("PORTFOLIO_AGENT_TIMEOUT_SEC", "240"))
-# 포트폴리오 빌더(단발 LLM) OpenAI 타임아웃(초) — portfolio_builder.py.
-PORTFOLIO_BUILDER_TIMEOUT_SEC = int(os.getenv("PORTFOLIO_BUILDER_TIMEOUT_SEC", "600"))
-# reasoning 모델(gpt-5 계열) 의 reasoning_effort. minimal/low/medium/high.
-# 4단계 portfolio·5단계 xai 둘 다에 적용되어 첫 chunk 까지의 reasoning 대기 시간을 줄인다.
-PORTFOLIO_AGENT_REASONING_EFFORT = os.getenv("PORTFOLIO_AGENT_REASONING_EFFORT", "medium")
-# stream 무응답(idle) 한계. chunk 사이 간격이 이 시간을 넘으면 강제 종료해
-# "5단계에서 멈춘 것처럼 보이는" 현상을 막는다.
-PORTFOLIO_AGENT_STREAM_INACTIVITY_SEC = int(
-    os.getenv("PORTFOLIO_AGENT_STREAM_INACTIVITY_SEC", "90")
-)
-
 # Monte Carlo 시뮬레이션
 MONTE_CARLO_SIMULATIONS = int(os.getenv("MONTE_CARLO_SIMULATIONS", "10000"))
 MONTE_CARLO_DAYS = int(os.getenv("MONTE_CARLO_DAYS", "252"))  # 1년 거래일
@@ -485,9 +467,6 @@ SCENARIO_MARKET_SHOCK_PCT = [-0.10, -0.20, -0.30]  # 시장 충격 시나리오
 
 # 히스토리 데이터 기간 (상관관계 / 변동성 계산용)
 RISK_HISTORY_PERIOD = os.getenv("RISK_HISTORY_PERIOD", "1y")
-
-# XAI 에이전트 온도 (설명 품질용 — 약간 높게)
-XAI_AGENT_TEMPERATURE = float(os.getenv("XAI_AGENT_TEMPERATURE", "0.4"))
 
 # ---------------------------------------------------------------------------
 # Backtesting (대시보드 시그널 + AI 전략실 추천)

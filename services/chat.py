@@ -60,7 +60,7 @@ _client = make_openai_client(timeout=CHAT_OPENAI_TIMEOUT_SEC)
 
 
 # ---------------------------------------------------------------------------
-# SSE 포맷 (portfolio_agents.py 와 동일 규칙: event + json data)
+# SSE 포맷 (event + json data)
 # ---------------------------------------------------------------------------
 
 def _sse(event: str, data: dict[str, Any]) -> str:
