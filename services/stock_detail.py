@@ -197,6 +197,57 @@ def fetch_quote(ticker: str) -> dict[str, Any]:
     return result
 
 
+# 일봉을 주/월/분기봉으로 리샘플하는 규칙. 차트 엔드포인트가 DB(price_history) 에서
+# 일봉을 읽어 직접 변환하므로 yfinance "1wk"/"1mo"/"3mo" 재호출이 사라진다.
+_RESAMPLE_RULES = {
+    "week": "W-MON",   # 주봉 — 월요일 시작
+    "month": "MS",     # 월봉 — 월 1일 시작
+    "year": "QS",      # 분기봉 — 분기 시작
+}
+
+
+def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """일봉 OHLCV → 주/월/분기봉 리샘플 (open=first, high=max, low=min, close=last, volume=sum)."""
+    if df is None or df.empty:
+        return df
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+    return df.resample(rule).agg(agg).dropna(subset=["close"])
+
+
+def _chart_bars_from_db(ticker: str, key: str) -> list[dict[str, Any]]:
+    """일봉~분기봉 차트를 price_history 에서 직접 만들어 반환.
+
+    DB 가 비어 있으면 빈 리스트 (호출부가 yfinance fallback). 주/월/분기봉은 일봉 리샘플.
+    부트스트랩이 끝난 뒤엔 차트 1회 호출 = DB 조회 1회 (yfinance 호출 0회).
+    """
+    from services.price_store import get_ohlcv_db
+    df = get_ohlcv_db(ticker)
+    if df is None or df.empty:
+        return []
+    if key != "day":
+        rule = _RESAMPLE_RULES.get(key)
+        if rule:
+            df = _resample_ohlcv(df, rule)
+
+    bars: list[dict[str, Any]] = []
+    for idx, row in df.iterrows():
+        close = _safe(row.get("close"))
+        if close is None:
+            continue
+        v = row.get("volume")
+        bars.append({
+            "timestamp": (
+                idx.isoformat() if hasattr(idx, "isoformat") else pd.Timestamp(idx).isoformat()
+            ),
+            "open": _safe(row.get("open")),
+            "high": _safe(row.get("high")),
+            "low": _safe(row.get("low")),
+            "close": close,
+            "volume": int(v) if v is not None and not pd.isna(v) else 0,
+        })
+    return bars
+
+
 def fetch_chart(ticker: str, period: str = "1D") -> list[dict[str, Any]]:
     """차트 데이터(OHLCV)를 가져온다.
 
@@ -224,6 +275,15 @@ def fetch_chart(ticker: str, period: str = "1D") -> list[dict[str, Any]]:
         cached = _chart_cache.get(cache_key)
         if cached is not None and now - cached[0] < ttl:
             return cached[1]
+
+    # 일봉 이상(day/week/month/year)은 DB(price_history) 에서 직접 — bootstrap 후 yfinance 미사용.
+    # DB 가 비어 있을 때(bootstrap 전 또는 non-S&P 종목)만 아래 yfinance 경로로 fallback.
+    if key not in _CHART_INTRADAY_KEYS:
+        db_bars = _chart_bars_from_db(upper, key)
+        if db_bars:
+            with _chart_cache_lock:
+                _chart_cache[cache_key] = (time.time(), db_bars)
+            return db_bars
 
     yf_period, yf_interval = preset
     try:

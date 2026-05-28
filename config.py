@@ -517,6 +517,19 @@ PRICE_DB_STALE_DAYS = int(os.getenv("PRICE_DB_STALE_DAYS", "5"))
 PRICE_DB_COVERAGE_THRESHOLD = float(os.getenv("PRICE_DB_COVERAGE_THRESHOLD", "0.5"))
 # price_history 페이지네이션 안전 상한 (200페이지 × 1000 = 20만 row)
 PRICE_HISTORY_MAX_PAGES = int(os.getenv("PRICE_HISTORY_MAX_PAGES", "200"))
+
+# 풀히스토리 부트스트랩(1회) — S&P 500 전체의 period="max" 일봉 OHLCV 를 받아 DB 에 저장.
+# 기동 시 커버리지가 부족할 때만 실행되며, 이후 일일 증분은 backfill_recent 가 담당한다.
+PRICE_BACKFILL_FULL_HISTORY_ENABLED = _bool_env("PRICE_BACKFILL_FULL_HISTORY_ENABLED", "true")
+# 부트스트랩 batch 당 ticker 수. period="max" 응답이 크니 너무 크게 잡지 말 것 (메모리).
+PRICE_BACKFILL_FULL_HISTORY_BATCH_SIZE = int(os.getenv("PRICE_BACKFILL_FULL_HISTORY_BATCH_SIZE", "20"))
+# 부트스트랩 batch 간 대기(초) — yfinance rate limit 분산.
+PRICE_BACKFILL_FULL_HISTORY_BATCH_DELAY_SEC = float(os.getenv("PRICE_BACKFILL_FULL_HISTORY_BATCH_DELAY_SEC", "1.0"))
+# 풀히스토리 충분 판정 — 최근 N일 이전 시점의 기록을 가진 ticker 가 M 개 이상이면 부트스트랩 스킵.
+PRICE_HISTORY_COVERAGE_MIN_TICKERS = int(os.getenv("PRICE_HISTORY_COVERAGE_MIN_TICKERS", "400"))
+PRICE_HISTORY_COVERAGE_MIN_DAYS = int(os.getenv("PRICE_HISTORY_COVERAGE_MIN_DAYS", "365"))
+# 일일 증분 backfill 이 S&P 500 전체를 커버하도록 강제 — False 면 active(analysis_results 최근) 만.
+PRICE_BACKFILL_RECENT_USE_SP500 = _bool_env("PRICE_BACKFILL_RECENT_USE_SP500", "true")
 # 진행 중(open) 포지션 라이브 뷰 — 현재가 자주 변동 → 짧은 TTL
 BACKTEST_LIVE_CACHE_TTL_SEC = int(os.getenv("BACKTEST_LIVE_CACHE_TTL_SEC", "60"))  # 1분
 # 진행 중 포지션 응답에 포함할 포지션 상한 (horizon별)

@@ -22,9 +22,14 @@ import pandas as pd
 import yfinance as yf
 
 from config import (
+    PRICE_BACKFILL_FULL_HISTORY_BATCH_DELAY_SEC,
+    PRICE_BACKFILL_FULL_HISTORY_BATCH_SIZE,
     PRICE_BACKFILL_LOOKBACK_DAYS,
+    PRICE_BACKFILL_RECENT_USE_SP500,
     PRICE_DB_COVERAGE_THRESHOLD,
     PRICE_DB_STALE_DAYS,
+    PRICE_HISTORY_COVERAGE_MIN_DAYS,
+    PRICE_HISTORY_COVERAGE_MIN_TICKERS,
     PRICE_HISTORY_MAX_PAGES,
 )
 from services.crud import _get_client
@@ -167,6 +172,51 @@ def get_close_prices_db(
             break
 
     return _rows_to_close_df(collected)
+
+
+def get_ohlcv_db(
+    ticker: str,
+    start: date | None = None,
+    end: date | None = None,
+) -> pd.DataFrame:
+    """단일 ticker 의 OHLCV 시계열 — index=DatetimeIndex, columns=open/high/low/close/volume.
+
+    차트 엔드포인트가 yfinance 재호출 없이 일봉을 가져올 수 있게 한다.
+    """
+    if not ticker:
+        return pd.DataFrame()
+
+    client = _get_client()
+    upper = ticker.upper().strip()
+    collected: list[dict] = []
+    for page in range(PRICE_HISTORY_MAX_PAGES):
+        start_idx = page * _PRICE_PAGE_SIZE
+        end_idx = start_idx + _PRICE_PAGE_SIZE - 1
+        try:
+            q = (
+                client.table(_TABLE)
+                .select("date, open, high, low, close, volume")
+                .eq("ticker", upper)
+            )
+            if start is not None:
+                q = q.gte("date", start.isoformat())
+            if end is not None:
+                q = q.lte("date", end.isoformat())
+            resp = q.order("date", desc=False).range(start_idx, end_idx).execute()
+        except Exception as e:
+            logger.warning("price_history OHLCV 조회 실패 (%s, page %d): %s", upper, page, e)
+            break
+        rows = resp.data or []
+        collected.extend(rows)
+        if len(rows) < _PRICE_PAGE_SIZE:
+            break
+
+    if not collected:
+        return pd.DataFrame()
+    df = pd.DataFrame(collected)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date").sort_index()
+    return df[["open", "high", "low", "close", "volume"]]
 
 
 def upsert_price_rows(rows: list[dict]) -> int:
@@ -317,8 +367,16 @@ def backfill_recent(days: int | None = None) -> dict[str, Any]:
     lookback = days or PRICE_BACKFILL_LOOKBACK_DAYS
 
     tickers = _active_tickers_recent()
+    if PRICE_BACKFILL_RECENT_USE_SP500:
+        # S&P 500 전체를 일일 증분 대상에 포함 — 차트가 DB 만으로 동작하도록 한다.
+        try:
+            from services.scanner import get_all_tickers
+            sp500 = get_all_tickers()
+            tickers = sorted({(t or "").upper() for t in (tickers + sp500) if t})
+        except Exception as e:
+            logger.warning("backfill_recent S&P 500 보강 실패 (active만 사용): %s", e)
     if not tickers:
-        return {"tickers": 0, "rows_written": 0, "elapsed_sec": 0.0, "message": "active ticker 없음"}
+        return {"tickers": 0, "rows_written": 0, "elapsed_sec": 0.0, "message": "ticker 없음"}
 
     end = datetime.now(timezone.utc).date()
     start = end - timedelta(days=lookback)
@@ -345,3 +403,87 @@ def backfill_recent(days: int | None = None) -> dict[str, Any]:
         "rows_written": rows_written,
         "elapsed_sec": round(time.time() - start_ts, 2),
     }
+
+
+# ---------------------------------------------------------------------------
+# 풀히스토리 부트스트랩 (1회) — period="max" 일봉을 S&P 500 전체에 대해 저장.
+# ---------------------------------------------------------------------------
+
+def backfill_full_history(tickers: list[str]) -> dict[str, Any]:
+    """모든 ticker 의 period='max' 일봉 OHLCV 를 yfinance 에서 받아 price_history 에 upsert.
+
+    한 번만 실행하면 충분하다 — 이후엔 backfill_recent 가 일일 증분을 갱신한다.
+    upsert(ticker,date on_conflict) 라 중복 실행해도 데이터 손상이 없다(idempotent).
+    """
+    if not tickers:
+        return {"tickers": 0, "rows_written": 0, "elapsed_sec": 0.0, "message": "ticker 없음"}
+
+    start_ts = time.time()
+    cleaned = sorted({(t or "").upper().strip() for t in tickers if t})
+    batch_size = max(1, PRICE_BACKFILL_FULL_HISTORY_BATCH_SIZE)
+    delay = max(0.0, PRICE_BACKFILL_FULL_HISTORY_BATCH_DELAY_SEC)
+    total_rows = 0
+    total_batches = (len(cleaned) + batch_size - 1) // batch_size
+    logger.info(
+        "price_history 풀히스토리 부트스트랩 시작: %d tickers, %d batches (size=%d)",
+        len(cleaned), total_batches, batch_size,
+    )
+
+    for i in range(0, len(cleaned), batch_size):
+        batch = cleaned[i : i + batch_size]
+        batch_no = i // batch_size + 1
+        if i > 0 and delay > 0:
+            time.sleep(delay)  # batch 간 대기 — rate limit 분산
+        try:
+            yf_df = throttled(
+                yf.download,
+                batch,
+                period="max",
+                interval="1d",
+                progress=False,
+                auto_adjust=False,
+                threads=True,
+            )
+            rows = _yf_to_rows(yf_df, batch)
+            if rows:
+                written = upsert_price_rows(rows)
+                total_rows += written
+                logger.info(
+                    "부트스트랩 batch %d/%d: %d tickers, %d rows upserted (누적 %d)",
+                    batch_no, total_batches, len(batch), written, total_rows,
+                )
+            else:
+                logger.warning(
+                    "부트스트랩 batch %d/%d: rows 없음 (예: %s)",
+                    batch_no, total_batches, batch[:3],
+                )
+        except Exception as e:
+            logger.warning("부트스트랩 batch %d/%d 실패: %s", batch_no, total_batches, e)
+
+    elapsed = round(time.time() - start_ts, 2)
+    logger.info(
+        "price_history 풀히스토리 부트스트랩 완료: %d rows, %.1fs",
+        total_rows, elapsed,
+    )
+    return {"tickers": len(cleaned), "rows_written": total_rows, "elapsed_sec": elapsed}
+
+
+def check_price_history_coverage() -> dict[str, Any]:
+    """price_history 가 부트스트랩이 필요할 만큼 부족한지 점검 (전체 row 수 기반).
+
+    임계치 = MIN_TICKERS × MIN_DAYS × 5/7(주말 제외) — 예: 400 × 365 × 5/7 ≈ 104,286 rows.
+    DB row 수가 이 임계를 넘으면 풀히스토리가 충분하다고 보고 부트스트랩을 스킵한다.
+    """
+    min_rows = int(
+        PRICE_HISTORY_COVERAGE_MIN_TICKERS * PRICE_HISTORY_COVERAGE_MIN_DAYS * 5 / 7
+    )
+    client = _get_client()
+    try:
+        resp = (
+            client.table(_TABLE).select("ticker", count="exact", head=True).execute()
+        )
+        total = getattr(resp, "count", None) or 0
+    except Exception as e:
+        logger.warning("price_history coverage 조회 실패: %s", e)
+        return {"ok": False, "total_rows": 0, "min_rows": min_rows, "error": str(e)}
+    return {"ok": total >= min_rows, "total_rows": int(total), "min_rows": min_rows}

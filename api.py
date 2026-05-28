@@ -123,6 +123,44 @@ async def _seed_initial_caches():
         logger.warning("기동 시 뉴스 수집 실패: %s", e, exc_info=True)
 
 
+async def _bootstrap_price_history():
+    """1회성 부트스트랩 — price_history 가 부족하면 S&P 500 풀히스토리(period=max)를 백필.
+
+    upsert 라 재실행 안전(idempotent). 백그라운드로 진행되어 서버 기동을 막지 않으며,
+    완료 전엔 차트 엔드포인트가 yfinance fallback 으로 동작한다.
+    """
+    from config import PRICE_BACKFILL_FULL_HISTORY_ENABLED
+    if not PRICE_BACKFILL_FULL_HISTORY_ENABLED:
+        logger.info("price_history 부트스트랩 비활성 (PRICE_BACKFILL_FULL_HISTORY_ENABLED=false)")
+        return
+    try:
+        from services.price_store import backfill_full_history, check_price_history_coverage
+        coverage = await asyncio.to_thread(check_price_history_coverage)
+    except Exception as e:
+        logger.warning("price_history 커버리지 점검 실패 — 부트스트랩 스킵: %s", e)
+        return
+    if coverage.get("ok"):
+        logger.info(
+            "price_history 풀히스토리 충분 (%s rows ≥ %s) — 부트스트랩 스킵",
+            coverage.get("total_rows"), coverage.get("min_rows"),
+        )
+        return
+    logger.info(
+        "price_history 부족 (%s rows < %s) — 백그라운드 부트스트랩 시작 (수십 분 소요 가능)",
+        coverage.get("total_rows", 0), coverage.get("min_rows", 0),
+    )
+    try:
+        from services.scanner import get_all_tickers
+        tickers = await asyncio.to_thread(get_all_tickers)
+        if not tickers:
+            logger.warning("S&P 500 ticker 리스트 비어 있음 — 부트스트랩 스킵")
+            return
+        result = await asyncio.to_thread(backfill_full_history, tickers)
+        logger.info("price_history 풀히스토리 부트스트랩 완료: %s", result)
+    except Exception as e:
+        logger.exception("price_history 풀히스토리 부트스트랩 실패: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # PaaS(Render 등) port scan timeout 회피: yield 까지 도달 시간을 최소화한다.
@@ -138,6 +176,7 @@ async def lifespan(app: FastAPI):
     logger.info("init_db 완료, 백그라운드 task 등록 중")
 
     seed_task = asyncio.create_task(_seed_initial_caches())
+    bootstrap_task = spawn_logged(_bootstrap_price_history(), name="price_history_bootstrap")
     scan_task = asyncio.create_task(run_analysis_loop())
     macro_task = asyncio.create_task(run_macro_loop())
     price_tick_task = asyncio.create_task(run_price_tick_loop())
@@ -149,6 +188,7 @@ async def lifespan(app: FastAPI):
     yield
     logger.info("lifespan shutdown — task 정리")
     seed_task.cancel()
+    bootstrap_task.cancel()
     scan_task.cancel()
     macro_task.cancel()
     price_tick_task.cancel()
