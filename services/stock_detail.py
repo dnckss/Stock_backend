@@ -15,6 +15,8 @@ import pandas as pd
 import yfinance as yf
 
 from config import (
+    PRICE_BACKFILL_FULL_HISTORY_ENABLED,
+    PRICE_HISTORY_COVERAGE_MIN_DAYS,
     STOCK_CHART_DAILY_TTL_SEC,
     STOCK_CHART_INTRADAY_TTL_SEC,
     STOCK_QUOTE_CACHE_TTL_SEC,
@@ -36,6 +38,49 @@ _chart_cache_lock = threading.Lock()
 
 
 _CHART_INTRADAY_KEYS = frozenset({"1min", "5min", "30min", "60min"})
+
+# 온디맨드 풀히스토리 백필 — 차트 요청 시 DB 히스토리가 얕으면(상장 이후 전체가 아직
+# 안 채워졌으면) 해당 종목만 1회 백필한다. 프로세스 단위로 종목당 1회만 시도해
+# yfinance 재호출/young-stock 무한재시도를 막는다. (전체 부트스트랩의 lazy 버전)
+_full_backfill_attempted: set[str] = set()
+_full_backfill_lock = threading.Lock()
+
+
+def _maybe_backfill_full_history(ticker: str) -> None:
+    """일봉 이상 차트 요청 시, DB 히스토리가 얕으면 해당 종목 풀히스토리를 1회 백필.
+
+    DB 의 최초 일자가 COVERAGE_MIN_DAYS 보다 최근이면 '상장 이후 전체가 아직 없음'으로
+    보고 backfill_full_history([ticker]) 를 동기 실행한다. upsert 라 idempotent.
+    실제 상장이 오래되지 않은 종목은 백필해도 여전히 얕지만, attempted set 으로
+    재시도를 차단한다.
+    """
+    if not PRICE_BACKFILL_FULL_HISTORY_ENABLED:
+        return
+    upper = (ticker or "").upper().strip()
+    if not upper:
+        return
+    with _full_backfill_lock:
+        if upper in _full_backfill_attempted:
+            return
+        _full_backfill_attempted.add(upper)  # 동시 요청/재요청 모두 1회로 제한
+
+    try:
+        from services.price_store import get_ohlcv_db, backfill_full_history
+        df = get_ohlcv_db(upper)
+        if df is not None and not df.empty:
+            earliest = pd.Timestamp(df.index.min())
+            if earliest.tzinfo is not None:
+                earliest = earliest.tz_localize(None)
+            threshold = pd.Timestamp.now().normalize() - pd.Timedelta(
+                days=PRICE_HISTORY_COVERAGE_MIN_DAYS
+            )
+            if earliest <= threshold:
+                return  # 이미 충분한 과거까지 보유 → 백필 불필요
+        logger.info("온디맨드 풀히스토리 백필 시작: %s", upper)
+        result = backfill_full_history([upper])
+        logger.info("온디맨드 풀히스토리 백필 완료: %s — %s", upper, result)
+    except Exception as e:
+        logger.warning("온디맨드 풀히스토리 백필 실패 (%s): %s", upper, e)
 
 
 def _chart_ttl_for(period_key: str) -> int:
@@ -285,6 +330,8 @@ def fetch_chart(ticker: str, period: str = "1D") -> list[dict[str, Any]]:
     # 일봉 이상(day/week/month/year)은 DB(price_history) 에서 직접 — bootstrap 후 yfinance 미사용.
     # DB 가 비어 있을 때(bootstrap 전 또는 non-S&P 종목)만 아래 yfinance 경로로 fallback.
     if key not in _CHART_INTRADAY_KEYS:
+        # DB 히스토리가 얕으면(상장 이후 전체 미보유) 해당 종목만 1회 풀히스토리 백필.
+        _maybe_backfill_full_history(upper)
         db_bars = _chart_bars_from_db(upper, key)
         if db_bars:
             with _chart_cache_lock:
