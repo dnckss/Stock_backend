@@ -202,7 +202,7 @@ def fetch_quote(ticker: str) -> dict[str, Any]:
 _RESAMPLE_RULES = {
     "week": "W-MON",   # 주봉 — 월요일 시작
     "month": "MS",     # 월봉 — 월 1일 시작
-    "year": "QS",      # 분기봉 — 분기 시작
+    "year": "YS",      # 년봉 — 연 1월 1일 시작 (프론트 라벨 '년'과 일치)
 }
 
 
@@ -214,21 +214,10 @@ def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     return df.resample(rule).agg(agg).dropna(subset=["close"])
 
 
-def _chart_bars_from_db(ticker: str, key: str) -> list[dict[str, Any]]:
-    """일봉~분기봉 차트를 price_history 에서 직접 만들어 반환.
-
-    DB 가 비어 있으면 빈 리스트 (호출부가 yfinance fallback). 주/월/분기봉은 일봉 리샘플.
-    부트스트랩이 끝난 뒤엔 차트 1회 호출 = DB 조회 1회 (yfinance 호출 0회).
-    """
-    from services.price_store import get_ohlcv_db
-    df = get_ohlcv_db(ticker)
+def _df_to_bars(df: pd.DataFrame) -> list[dict[str, Any]]:
+    """소문자 OHLCV 컬럼 DataFrame → 차트 bar dict 리스트 (DB/yfinance fallback 공용)."""
     if df is None or df.empty:
         return []
-    if key != "day":
-        rule = _RESAMPLE_RULES.get(key)
-        if rule:
-            df = _resample_ohlcv(df, rule)
-
     bars: list[dict[str, Any]] = []
     for idx, row in df.iterrows():
         close = _safe(row.get("close"))
@@ -246,6 +235,23 @@ def _chart_bars_from_db(ticker: str, key: str) -> list[dict[str, Any]]:
             "volume": int(v) if v is not None and not pd.isna(v) else 0,
         })
     return bars
+
+
+def _chart_bars_from_db(ticker: str, key: str) -> list[dict[str, Any]]:
+    """일봉~년봉 차트를 price_history 에서 직접 만들어 반환.
+
+    DB 가 비어 있으면 빈 리스트 (호출부가 yfinance fallback). 주/월/년봉은 일봉 리샘플.
+    부트스트랩이 끝난 뒤엔 차트 1회 호출 = DB 조회 1회 (yfinance 호출 0회).
+    """
+    from services.price_store import get_ohlcv_db
+    df = get_ohlcv_db(ticker)
+    if df is None or df.empty:
+        return []
+    if key != "day":
+        rule = _RESAMPLE_RULES.get(key)
+        if rule:
+            df = _resample_ohlcv(df, rule)
+    return _df_to_bars(df)
 
 
 def fetch_chart(ticker: str, period: str = "1D") -> list[dict[str, Any]]:
@@ -285,7 +291,10 @@ def fetch_chart(ticker: str, period: str = "1D") -> list[dict[str, Any]]:
                 _chart_cache[cache_key] = (time.time(), db_bars)
             return db_bars
 
-    yf_period, yf_interval = preset
+    # 주/월/년봉은 일봉을 받아 DB 경로와 동일 규칙으로 리샘플 → 일관성 보장.
+    # (yfinance 에는 '년' 인터벌이 없어 1wk/1mo/3mo 직접 호출 대신 일봉 리샘플로 통일)
+    rule = _RESAMPLE_RULES.get(key)
+    yf_period, yf_interval = ("max", "1d") if rule else preset
     try:
         df = yf.download(ticker, period=yf_period, interval=yf_interval, progress=False)
     except Exception as e:
@@ -295,31 +304,18 @@ def fetch_chart(ticker: str, period: str = "1D") -> list[dict[str, Any]]:
     if df.empty:
         return []
 
-    # MultiIndex 처리
+    # MultiIndex 처리 + 컬럼명 소문자 정규화 (DB 스키마와 통일)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+    df = df.rename(columns={
+        "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume",
+    })
+    if rule:
+        df = _resample_ohlcv(df, rule)
 
-    bars: list[dict[str, Any]] = []
-    for idx, row in df.iterrows():
-        try:
-            ts = idx if hasattr(idx, "isoformat") else pd.Timestamp(idx)
-            o = _safe(row.get("Open"))
-            h = _safe(row.get("High"))
-            l_ = _safe(row.get("Low"))
-            c = _safe(row.get("Close"))
-            v = row.get("Volume")
-            if c is None:
-                continue
-            bars.append({
-                "timestamp": ts.isoformat(),
-                "open": o,
-                "high": h,
-                "low": l_,
-                "close": c,
-                "volume": int(v) if v is not None and not pd.isna(v) else 0,
-            })
-        except Exception:
-            continue
+    bars = _df_to_bars(df)
+    if not bars:
+        return []
 
     with _chart_cache_lock:
         _chart_cache[cache_key] = (time.time(), bars)
