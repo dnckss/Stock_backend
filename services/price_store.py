@@ -219,6 +219,64 @@ def get_ohlcv_db(
     return df[["open", "high", "low", "close", "volume"]]
 
 
+def get_ohlc_prices_db(
+    tickers: list[str],
+    start: date,
+    end: date,
+) -> dict[str, pd.DataFrame]:
+    """price_history 에서 (ticker, date) 범위의 OHLC 를 ticker별 DataFrame 으로 반환한다.
+
+    반환: {TICKER: DataFrame(index=DatetimeIndex, columns=[open, high, low, close])}.
+    종가 전용 경로(get_close_prices_db)와 분리한 이유 — 손절/목표가 intrabar 청산
+    평가에는 고가(high)·저가(low)가 필요하기 때문. 조회 실패/빈 결과면 빈 dict.
+    """
+    if not tickers:
+        return {}
+
+    uppers = sorted({(t or "").upper().strip() for t in tickers if t})
+    if not uppers:
+        return {}
+
+    client = _get_client()
+    collected: list[dict] = []
+    for page in range(PRICE_HISTORY_MAX_PAGES):
+        start_idx = page * _PRICE_PAGE_SIZE
+        end_idx = start_idx + _PRICE_PAGE_SIZE - 1
+        try:
+            resp = (
+                client.table(_TABLE)
+                .select("ticker, date, open, high, low, close")
+                .in_("ticker", uppers)
+                .gte("date", start.isoformat())
+                .lte("date", end.isoformat())
+                .order("date", desc=False)
+                .range(start_idx, end_idx)
+                .execute()
+            )
+        except Exception as e:
+            logger.warning("price_history OHLC 배치 조회 실패 (page %d): %s", page, e)
+            break
+        rows = resp.data or []
+        collected.extend(rows)
+        if len(rows) < _PRICE_PAGE_SIZE:
+            break
+
+    if not collected:
+        return {}
+
+    df = pd.DataFrame(collected)
+    df["date"] = pd.to_datetime(df["date"])
+    out: dict[str, pd.DataFrame] = {}
+    for ticker, grp in df.groupby("ticker"):
+        frame = (
+            grp.drop_duplicates(subset="date", keep="last")
+            .set_index("date")
+            .sort_index()[["open", "high", "low", "close"]]
+        )
+        out[str(ticker).upper()] = frame
+    return out
+
+
 def upsert_price_rows(rows: list[dict]) -> int:
     """ticker+date 충돌 시 갱신. chunk 500 으로 나눠 호출."""
     if not rows:

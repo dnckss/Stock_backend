@@ -567,6 +567,41 @@ BACKTEST_SIGNALS_INCLUDE_DIRECTIONS = frozenset(
 # yfinance 일괄 다운로드 기간 여유(주말/공휴일 대비)
 BACKTEST_PRICE_LOOKAHEAD_DAYS = 14
 
+# --- 거래 비용 & 슬리피지 (백테스트 현실화) ---
+# 왕복(진입+청산) 거래 비용을 bps(1bp=0.01%) 로 지정. commission + slippage 합산 개념.
+# 모든 백테스트 수익률(adjusted/portfolio)은 이 비용을 차감한 net 기준으로 산출되며,
+# raw_return_pct(방향 미조정 총수익률)은 비용 차감 전 gross 로 유지해 투명성을 확보한다.
+# 0 이면 비용 미반영. 대형주(S&P 500) 기준 왕복 10bps(0.10%) 를 보수적 기본값으로.
+BACKTEST_COST_BPS = float(os.getenv("BACKTEST_COST_BPS", "10.0"))
+
+# --- 손절/목표가 청산 모델 (전략실 추천 전용) ---
+# 전략실 추천은 stop_loss / target 가격(절대가)을 함께 산출한다. price_history 의
+# OHLC 고저가를 이용해 horizon 내에서 손절·목표가가 먼저 닿았는지 평가하고, 닿았다면
+# 그 가격에 청산했다고 가정한다(미달이면 기존처럼 horizon 종가 시간청산).
+# True 면 전략실 백테스트/trade/live 에 손절·익절이 반영돼 "계획대로 운용"한 결과가 된다.
+BACKTEST_PLANNED_EXIT_ENABLED = _bool_env("BACKTEST_PLANNED_EXIT_ENABLED", "true")
+# 같은 거래일 범위 안에서 손절·목표가가 동시에 닿은 경우 어느 쪽을 먼저 체결로 볼지.
+# 보수적으로 손절 우선('stop'). 'target' 지정 시 목표가 우선.
+BACKTEST_INTRABAR_PRIORITY = os.getenv("BACKTEST_INTRABAR_PRIORITY", "stop").strip().lower()
+if BACKTEST_INTRABAR_PRIORITY not in ("stop", "target"):
+    BACKTEST_INTRABAR_PRIORITY = "stop"
+# 청산 사유 라벨 — 단일 소스 (services/backtest 의 _Evaluation.exit_reason / by_exit_reason)
+BACKTEST_EXIT_REASON_STOP = "stop"
+BACKTEST_EXIT_REASON_TARGET = "target"
+BACKTEST_EXIT_REASON_TIME = "time"
+
+# --- 벤치마크 (시장 대비 알파) ---
+# 각 거래의 보유 구간(entry~exit) 동안 벤치마크(기본 SPY)가 낸 방향성 수익률 대비
+# 초과수익(알파)을 horizon 별로 집계한다. 빈 문자열이면 벤치마크 비교 비활성화.
+BACKTEST_BENCHMARK_TICKER = os.getenv("BACKTEST_BENCHMARK_TICKER", "SPY").upper().strip()
+
+# --- 통계 신뢰도(표본 수) ---
+# 헤드라인 지표가 통계적으로 신뢰할 만한 최소 표본 수. 미만이면 metrics.reliable=False.
+BACKTEST_RELIABLE_MIN_SAMPLES = int(os.getenv("BACKTEST_RELIABLE_MIN_SAMPLES", "20"))
+# CAGR(연복리) 연환산 최소 달력 구간(일). equity curve 구간이 너무 짧으면 연환산이
+# 비현실적으로 폭증(예: 며칠 만의 큰 수익을 1년으로 외삽)하므로 미만이면 CAGR/Calmar=None.
+BACKTEST_CAGR_MIN_SPAN_DAYS = int(os.getenv("BACKTEST_CAGR_MIN_SPAN_DAYS", "20"))
+
 # ---------------------------------------------------------------------------
 # AI Chat (종목 질의 챗봇, SSE 스트리밍)
 # ---------------------------------------------------------------------------

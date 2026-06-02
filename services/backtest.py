@@ -6,12 +6,17 @@
   - 각 레코드의 entry_price(저장된 price / entry mid) 대비 N거래일 후 종가로 수익률 계산
   - 방향 조정: BUY → raw_return, SELL → -raw_return
   - horizon이 아직 미래인 레코드는 자동 제외
+  - 거래비용(BACKTEST_COST_BPS, 왕복): adjusted 수익률에서 차감해 net 으로 산출
+  - 손절/목표가 청산(전략실 전용, BACKTEST_PLANNED_EXIT_ENABLED): stop_loss/target 가격이
+    horizon 내 OHLC 고저가에 먼저 닿으면 그 가격에 청산. 미달이면 horizon 종가 시간청산.
+    각 평가에 exit_reason(stop|target|time) 부여.
 
 산출 지표:
-  - hit_rate_pct, avg/median/best/worst, profit_factor
-  - Sharpe ratio (일간 수익률 기준 연환산)
+  - hit_rate_pct, avg/median/best/worst, profit_factor, reliable(표본 신뢰도 플래그)
+  - Sharpe / Sortino / Calmar ratio, CAGR (일간 수익률 기준 연환산)
   - Max drawdown, equity curve (동등가중 누적)
-  - 버킷별 분석: direction / divergence / signal_source / confidence / market_regime
+  - 벤치마크(SPY) 매칭윈도우 대비 알파(시장 초과수익)
+  - 버킷별 분석: direction / divergence / signal_source / confidence / market_regime / exit_reason
 """
 from __future__ import annotations
 
@@ -30,17 +35,26 @@ import pandas as pd
 
 from config import (
     BACKTEST_ANNUALIZATION_FACTOR,
+    BACKTEST_BENCHMARK_TICKER,
     BACKTEST_CACHE_TTL_SEC,
+    BACKTEST_CAGR_MIN_SPAN_DAYS,
+    BACKTEST_COST_BPS,
     BACKTEST_DEFAULT_HORIZONS,
     BACKTEST_DEFAULT_LOOKBACK_DAYS,
     BACKTEST_DIVERGENCE_BUCKETS,
+    BACKTEST_EXIT_REASON_STOP,
+    BACKTEST_EXIT_REASON_TARGET,
+    BACKTEST_EXIT_REASON_TIME,
+    BACKTEST_INTRABAR_PRIORITY,
     BACKTEST_LIVE_CACHE_TTL_SEC,
     BACKTEST_LIVE_POSITIONS_PER_HORIZON,
     BACKTEST_MAX_HORIZON_DAYS,
     BACKTEST_MAX_LOOKBACK_DAYS,
     BACKTEST_MIN_SAMPLES,
+    BACKTEST_PLANNED_EXIT_ENABLED,
     BACKTEST_PRICE_CACHE_TTL_SEC,
     BACKTEST_PRICE_LOOKAHEAD_DAYS,
+    BACKTEST_RELIABLE_MIN_SAMPLES,
     BACKTEST_SIGNALS_INCLUDE_DIRECTIONS,
     BACKTEST_TRADES_DEFAULT_GROUP_BY,
     BACKTEST_TRADES_DEFAULT_HORIZON,
@@ -54,6 +68,7 @@ from services.crud import (
     sanitize_for_json,
 )
 from services.price_store import fetch_close_prices as _fetch_from_store
+from services.price_store import get_ohlc_prices_db as _fetch_ohlc_from_store
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +121,21 @@ def _normalize_horizons(horizons: Iterable[int] | None) -> list[int]:
             continue
         out.add(iv)
     return sorted(out) if out else list(BACKTEST_DEFAULT_HORIZONS)
+
+
+# 왕복 거래비용(%) — bps/100 (1bp=0.01%). 모듈 로드 시 1회 계산.
+_ROUND_TRIP_COST_PCT = max(0.0, BACKTEST_COST_BPS) / 100.0
+
+
+def _net_return_pct(adjusted_pct: float) -> float:
+    """방향 조정 수익률(%)에서 왕복 거래비용(진입+청산)을 차감한 net 수익률(%).
+
+    비용은 손익 방향과 무관한 마찰(수수료+슬리피지)이므로 항상 차감한다.
+    BACKTEST_COST_BPS=0 이면 그대로 반환(gross=net).
+    """
+    if _ROUND_TRIP_COST_PCT <= 0:
+        return adjusted_pct
+    return adjusted_pct - _ROUND_TRIP_COST_PCT
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +216,83 @@ def _fetch_close_prices(
     return close
 
 
+# OHLC 프레임 캐시 — 손절/목표가 intrabar 평가용 고저가. 종가 캐시와 동일 TTL.
+_ohlc_cache: dict[tuple, tuple[float, dict[str, pd.DataFrame]]] = {}
+_ohlc_cache_lock = threading.Lock()
+
+
+def _fetch_ohlc_frames(
+    tickers: list[str],
+    start: date,
+    end: date,
+) -> dict[str, pd.DataFrame]:
+    """ticker별 OHLC 프레임 — 손절/목표가 청산 평가에 고저가가 필요해 별도 조회.
+
+    먼저 _fetch_close_prices 를 호출해 DB(price_history)가 채워지도록 보장한 뒤
+    (메모리 캐시 hit 이면 비용 거의 0), get_ohlc_prices_db 로 OHLC 를 읽어온다.
+    DB 에 아직 없는 ticker 는 dict 에서 빠지며, 호출부는 시간청산으로 자연 폴백한다.
+    """
+    if not tickers:
+        return {}
+
+    cache_key = _price_cache_key(tickers, start, end)
+    with _ohlc_cache_lock:
+        entry = _ohlc_cache.get(cache_key)
+        if entry and time.time() - entry[0] <= BACKTEST_PRICE_CACHE_TTL_SEC:
+            return entry[1]
+
+    # 종가 경로를 먼저 태워 DB upsert(yfinance fallback 포함)를 보장.
+    try:
+        _fetch_close_prices(tickers, start, end)
+    except Exception as e:
+        logger.warning("OHLC 선행 종가 fetch 실패: %s", e)
+
+    try:
+        frames = _fetch_ohlc_from_store(tickers, start, end)
+    except Exception as e:
+        logger.warning("OHLC 프레임 조회 실패: %s", e)
+        frames = {}
+
+    with _ohlc_cache_lock:
+        _ohlc_cache[cache_key] = (time.time(), frames)
+    return frames
+
+
+def _fetch_benchmark_series(start: date, end: date) -> pd.Series | None:
+    """벤치마크(BACKTEST_BENCHMARK_TICKER, 기본 SPY) 종가 시계열. 비활성/실패 시 None."""
+    if not BACKTEST_BENCHMARK_TICKER:
+        return None
+    try:
+        df = _fetch_close_prices([BACKTEST_BENCHMARK_TICKER], start, end)
+    except Exception as e:
+        logger.warning("벤치마크(%s) 시세 조회 실패: %s", BACKTEST_BENCHMARK_TICKER, e)
+        return None
+    if df is None or df.empty or BACKTEST_BENCHMARK_TICKER not in df.columns:
+        return None
+    series = df[BACKTEST_BENCHMARK_TICKER].dropna()
+    return series if not series.empty else None
+
+
+def _series_asof_val(series: pd.Series, day: date) -> float | None:
+    """day(포함) 시점의 직전 유효 종가 (series.asof). 변환 실패 시 None."""
+    if series is None or series.empty:
+        return None
+    idx = series.index
+    if not isinstance(idx, pd.DatetimeIndex):
+        try:
+            series = pd.Series(series.values, index=pd.DatetimeIndex(idx))
+        except Exception:
+            return None
+    val = series.asof(pd.Timestamp(day))
+    if val is None or pd.isna(val):
+        return None
+    try:
+        f = float(val)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) and f != 0 else None
+
+
 def _exit_price_after(
     close_df: pd.DataFrame,
     ticker: str,
@@ -236,6 +343,103 @@ def _exit_price_after(
     return None, None
 
 
+def _planned_exit(
+    ohlc: pd.DataFrame | None,
+    ticker: str,
+    entry_dt: datetime,
+    horizon: int,
+    direction: str,
+    entry_price: float,
+    stop_loss: float | None,
+    target_price: float | None,
+) -> tuple[float | None, date | None, str | None]:
+    """horizon 내 거래일을 순회하며 손절/목표가 도달 여부를 OHLC 고저가로 평가.
+
+    BUY  : 저가<=stop → 손절,  고가>=target → 익절 (stop<entry<target 이어야 유효)
+    SELL : 고가>=stop → 손절,  저가<=target → 익절 (target<entry<stop 이어야 유효)
+    같은 날 둘 다 닿으면 BACKTEST_INTRABAR_PRIORITY 로 우선순위 결정.
+
+    체결가는 갭(gap)을 반영한다 — 시가가 이미 레벨을 지나쳤으면 시가로 체결한 것으로 본다.
+      · BUY  손절: min(open, stop)  / 익절: max(open, target)
+      · SELL 손절: max(open, stop)  / 익절: min(open, target)
+
+    스캔은 entry 다음 거래일부터 '가용한' horizon 거래일까지만 한다. 따라서 horizon 이
+    아직 안 찼어도 그 사이 손절·익절이 닿았으면 조기청산으로 잡힌다.
+    아무 레벨도 안 닿으면 (None, None, None) → 호출부가 시간청산(종가)으로 폴백.
+
+    반환: (exit_price, exit_date, reason) — reason ∈ {stop, target}.
+    """
+    if ohlc is None or ohlc.empty or "high" not in ohlc.columns or "low" not in ohlc.columns:
+        return None, None, None
+    if entry_price is None or entry_price <= 0:
+        return None, None, None
+
+    # 방향별로 유효한 레벨만 채택 (잘못된 쪽에 있는 값은 무시 — LLM 환각 방어)
+    stop = _safe_float(stop_loss)
+    target = _safe_float(target_price)
+    if direction == "BUY":
+        if stop is not None and not (0 < stop < entry_price):
+            stop = None
+        if target is not None and not (target > entry_price):
+            target = None
+    elif direction == "SELL":
+        if stop is not None and not (stop > entry_price):
+            stop = None
+        if target is not None and not (0 < target < entry_price):
+            target = None
+    else:
+        return None, None, None
+    if stop is None and target is None:
+        return None, None, None
+
+    idx = ohlc.index
+    if not isinstance(idx, pd.DatetimeIndex):
+        try:
+            ohlc = ohlc.copy()
+            ohlc.index = pd.DatetimeIndex(idx)
+        except Exception:
+            return None, None, None
+
+    window = ohlc[ohlc.index.date > entry_dt.date()].iloc[:horizon]
+    if window.empty:
+        return None, None, None
+
+    for ts, row in window.iterrows():
+        hi = _safe_float(row.get("high"))
+        lo = _safe_float(row.get("low"))
+        op = _safe_float(row.get("open"))
+        if hi is None or lo is None:
+            continue
+        if op is None:
+            op = (hi + lo) / 2.0
+
+        stop_hit = False
+        target_hit = False
+        if direction == "BUY":
+            stop_hit = stop is not None and lo <= stop
+            target_hit = target is not None and hi >= target
+        else:  # SELL
+            stop_hit = stop is not None and hi >= stop
+            target_hit = target is not None and lo <= target
+
+        if not stop_hit and not target_hit:
+            continue
+
+        # 같은 날 둘 다 닿으면 우선순위로 결정
+        if stop_hit and target_hit:
+            use_stop = (BACKTEST_INTRABAR_PRIORITY == "stop")
+        else:
+            use_stop = stop_hit
+
+        if use_stop:
+            fill = min(op, stop) if direction == "BUY" else max(op, stop)
+            return fill, ts.date(), BACKTEST_EXIT_REASON_STOP
+        fill = max(op, target) if direction == "BUY" else min(op, target)
+        return fill, ts.date(), BACKTEST_EXIT_REASON_TARGET
+
+    return None, None, None
+
+
 # ---------------------------------------------------------------------------
 # 메트릭 계산
 # ---------------------------------------------------------------------------
@@ -246,6 +450,7 @@ def _compute_metrics(returns_pct: list[float]) -> dict[str, Any]:
     if n == 0:
         return {
             "count": 0,
+            "reliable": False,
             "hit_rate_pct": None,
             "avg_return_pct": None,
             "median_return_pct": None,
@@ -276,6 +481,7 @@ def _compute_metrics(returns_pct: list[float]) -> dict[str, Any]:
 
     return {
         "count": n,
+        "reliable": n >= BACKTEST_RELIABLE_MIN_SAMPLES,
         "hit_rate_pct": _round(p_win * 100, 2),
         "avg_return_pct": _round(statistics.fmean(returns_pct), 2),
         "median_return_pct": _round(statistics.median(returns_pct), 2),
@@ -305,6 +511,9 @@ def _compute_equity_curve(
             "total_return_pct": 0.0,
             "max_drawdown_pct": 0.0,
             "sharpe_ratio": None,
+            "sortino_ratio": None,
+            "calmar_ratio": None,
+            "cagr_pct": None,
             "days": 0,
         }
 
@@ -335,13 +544,32 @@ def _compute_equity_curve(
             "return_pct": _round(day_ret * 100, 2),
         })
 
-    # Sharpe (rf=0, 일간 수익률 기준 연환산)
+    # Sharpe / Sortino (rf=0, 일간 수익률 기준 연환산)
     sharpe: float | None = None
+    sortino: float | None = None
     if len(daily_returns) > 1:
         mean_r = statistics.fmean(daily_returns)
         std_r = statistics.pstdev(daily_returns)
         if std_r > 0:
             sharpe = (mean_r / std_r) * math.sqrt(BACKTEST_ANNUALIZATION_FACTOR)
+        # Sortino: 하방 편차만 분모로 (target=0, 모든 구간 대상 min(0,r)^2 평균의 sqrt)
+        downside_var = statistics.fmean([min(0.0, r) ** 2 for r in daily_returns])
+        downside_dev = math.sqrt(downside_var)
+        if downside_dev > 0:
+            sortino = (mean_r / downside_dev) * math.sqrt(BACKTEST_ANNUALIZATION_FACTOR)
+
+    # CAGR (연복리) — curve 의 달력 구간 기준. Calmar = CAGR / |MDD|.
+    # 구간이 너무 짧으면 연환산이 비현실적으로 폭증하므로 최소 span 미만은 None.
+    cagr: float | None = None
+    if len(sorted_days) >= 2 and equity > 0:
+        span_days = (sorted_days[-1] - sorted_days[0]).days
+        if span_days >= BACKTEST_CAGR_MIN_SPAN_DAYS:
+            years = span_days / 365.25
+            if years > 0:
+                cagr = (equity ** (1.0 / years) - 1.0) * 100.0
+    calmar: float | None = None
+    if cagr is not None and max_dd < 0:
+        calmar = cagr / abs(max_dd * 100.0)
 
     return {
         "curve": curve,
@@ -349,6 +577,9 @@ def _compute_equity_curve(
         "total_return_pct": _round((equity - 1) * 100, 2),
         "max_drawdown_pct": _round(max_dd * 100, 2),
         "sharpe_ratio": _round(sharpe, 2) if sharpe is not None else None,
+        "sortino_ratio": _round(sortino, 2) if sortino is not None else None,
+        "calmar_ratio": _round(calmar, 2) if calmar is not None else None,
+        "cagr_pct": _round(cagr, 2) if cagr is not None else None,
         "days": len(sorted_days),
     }
 
@@ -362,12 +593,13 @@ class _Evaluation:
     __slots__ = (
         "record", "direction", "entry_price", "exit_price",
         "raw_return_pct", "adjusted_return_pct",
-        "entry_date", "exit_date", "horizon",
+        "entry_date", "exit_date", "horizon", "exit_reason",
     )
 
     def __init__(self, record, direction, entry_price, exit_price,
                  raw_return_pct, adjusted_return_pct,
-                 entry_date, exit_date, horizon):
+                 entry_date, exit_date, horizon,
+                 exit_reason=BACKTEST_EXIT_REASON_TIME):
         self.record = record
         self.direction = direction
         self.entry_price = entry_price
@@ -377,6 +609,16 @@ class _Evaluation:
         self.entry_date = entry_date
         self.exit_date = exit_date
         self.horizon = horizon
+        self.exit_reason = exit_reason
+
+
+def _pick_target_price(record: dict, target_keys: tuple[str, ...]) -> float | None:
+    """target_keys 순서대로 첫 유효(양수) 목표가를 반환 — 첫 목표가(TP1) 도달 시 청산 가정."""
+    for tk in target_keys:
+        tv = _safe_float(record.get(tk))
+        if tv is not None and tv > 0:
+            return tv
+    return None
 
 
 def _evaluate_records(
@@ -386,13 +628,22 @@ def _evaluate_records(
     *,
     price_key: str = "price",
     direction_key: str = "signal",
+    ohlc_frames: dict[str, pd.DataFrame] | None = None,
+    use_planned_exit: bool = False,
+    stop_key: str = "stop_loss",
+    target_keys: tuple[str, ...] = ("target1_price", "target2_price"),
 ) -> list[_Evaluation]:
     """
-    records 각각에 대해 horizon 후 exit price로 방향 조정 수익률 계산.
+    records 각각에 대해 horizon 후 exit price로 방향 조정·비용차감 수익률 계산.
     price_key: entry price가 들어있는 필드 ('price' | 별도 entry mid).
     direction_key: BUY/SELL 방향이 들어있는 필드 ('signal' | 'direction').
+
+    use_planned_exit=True(+ohlc_frames) 이면 손절/목표가가 horizon 내에 먼저 닿았는지
+    평가해 그 가격에 청산(exit_reason=stop|target). 미달이면 horizon 종가 시간청산(time).
+    adjusted_return_pct 는 왕복 거래비용을 차감한 net.
     """
     out: list[_Evaluation] = []
+    planned = use_planned_exit and BACKTEST_PLANNED_EXIT_ENABLED and bool(ohlc_frames)
     for r in records:
         ticker = (r.get("ticker") or "").upper()
         entry_price = _safe_float(r.get(price_key))
@@ -404,7 +655,24 @@ def _evaluate_records(
             # HOLD / WAIT / 기타는 평가 대상 아님
             continue
 
-        exit_price, exit_date = _exit_price_after(close_df, ticker, entry_dt, horizon)
+        exit_price: float | None = None
+        exit_date: date | None = None
+        exit_reason = BACKTEST_EXIT_REASON_TIME
+
+        # 1) 손절/목표가 청산 우선 평가 (조기청산 포함)
+        if planned:
+            ep, ed, reason = _planned_exit(
+                (ohlc_frames or {}).get(ticker), ticker, entry_dt, horizon,
+                direction_raw, entry_price,
+                _safe_float(r.get(stop_key)), _pick_target_price(r, target_keys),
+            )
+            if reason is not None:
+                exit_price, exit_date, exit_reason = ep, ed, reason
+
+        # 2) 손절/목표가 미도달 → horizon 종가 시간청산
+        if exit_price is None:
+            exit_price, exit_date = _exit_price_after(close_df, ticker, entry_dt, horizon)
+            exit_reason = BACKTEST_EXIT_REASON_TIME
         if exit_price is None or exit_date is None:
             continue
 
@@ -416,18 +684,23 @@ def _evaluate_records(
             entry_price=entry_price,
             exit_price=exit_price,
             raw_return_pct=raw_return,
-            adjusted_return_pct=adjusted,
+            adjusted_return_pct=_net_return_pct(adjusted),
             entry_date=entry_dt.date(),
             exit_date=exit_date,
             horizon=horizon,
+            exit_reason=exit_reason,
         ))
     return out
 
 
-def _download_prices_for(records: list[dict]) -> pd.DataFrame:
-    """records에서 티커와 날짜 범위 추출 후 yfinance 일괄 다운로드."""
+def _price_window_for(records: list[dict]) -> tuple[list[str], date, date] | None:
+    """records에서 (정렬된 티커 리스트, start, end) 가격 조회 윈도우를 추출.
+
+    종가/ OHLC / 벤치마크 fetch 가 같은 윈도우를 공유하도록 단일화한 헬퍼.
+    유효 티커·시점이 없으면 None.
+    """
     if not records:
-        return pd.DataFrame()
+        return None
     tickers: set[str] = set()
     earliest: datetime | None = None
     for r in records:
@@ -438,11 +711,60 @@ def _download_prices_for(records: list[dict]) -> pd.DataFrame:
         if dt and (earliest is None or dt < earliest):
             earliest = dt
     if not tickers or earliest is None:
-        return pd.DataFrame()
-
+        return None
     start = earliest.date() - timedelta(days=2)  # 여유
     end = datetime.now(timezone.utc).date() + timedelta(days=BACKTEST_PRICE_LOOKAHEAD_DAYS)
-    return _fetch_close_prices(sorted(tickers), start, end)
+    return sorted(tickers), start, end
+
+
+def _download_prices_for(records: list[dict]) -> pd.DataFrame:
+    """records에서 티커와 날짜 범위 추출 후 종가 시계열 조회(DB 우선 + yfinance fallback)."""
+    window = _price_window_for(records)
+    if window is None:
+        return pd.DataFrame()
+    tickers, start, end = window
+    return _fetch_close_prices(tickers, start, end)
+
+
+def _benchmark_for_evals(
+    bench_series: pd.Series | None,
+    evals: list[_Evaluation],
+) -> dict[str, Any] | None:
+    """평가집합 대비 벤치마크(시장) 방향성 수익률·알파를 집계.
+
+    각 거래의 보유 구간(entry_date~exit_date) 동안 벤치마크 수익률 b 를 구하고,
+    방향성 벤치마크 = b(BUY) / -b(SELL) 와 비교한다.
+      alpha_i = adjusted_return_pct(net) - directional_benchmark
+    "같은 방향으로 그냥 지수에 베팅한 것 대비 종목선택이 더했는가"를 답한다.
+    매칭 가능한 거래가 없으면 None.
+    """
+    if bench_series is None or not evals:
+        return None
+    alphas: list[float] = []
+    bench_rets: list[float] = []
+    wins = 0
+    for e in evals:
+        c_in = _series_asof_val(bench_series, e.entry_date)
+        c_out = _series_asof_val(bench_series, e.exit_date)
+        if c_in is None or c_out is None or c_in <= 0:
+            continue
+        b = (c_out - c_in) / c_in * 100.0
+        directional_b = b if e.direction == "BUY" else -b
+        alpha = e.adjusted_return_pct - directional_b
+        bench_rets.append(directional_b)
+        alphas.append(alpha)
+        if alpha > 0:
+            wins += 1
+    n = len(alphas)
+    if n == 0:
+        return None
+    return {
+        "ticker": BACKTEST_BENCHMARK_TICKER,
+        "matched_count": n,
+        "avg_benchmark_return_pct": _round(statistics.fmean(bench_rets), 2),
+        "avg_alpha_pct": _round(statistics.fmean(alphas), 2),
+        "win_vs_benchmark_pct": _round(wins / n * 100, 2),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -467,6 +789,18 @@ def _bucket_metrics(
         for k, v in groups.items()
         if len(v) >= min_samples
     }
+
+
+def _count_exit_reasons(evals: list[_Evaluation]) -> dict[str, int]:
+    """청산 사유별 거래 수 (stop / target / time)."""
+    counts = {
+        BACKTEST_EXIT_REASON_STOP: 0,
+        BACKTEST_EXIT_REASON_TARGET: 0,
+        BACKTEST_EXIT_REASON_TIME: 0,
+    }
+    for e in evals:
+        counts[e.exit_reason] = counts.get(e.exit_reason, 0) + 1
+    return counts
 
 
 def _divergence_buckets(evals: list[_Evaluation]) -> list[dict[str, Any]]:
@@ -549,7 +883,9 @@ def _run_signals_backtest_sync(
             message="평가할 시그널 레코드가 없습니다.",
         )
 
-    close_df = _download_prices_for(records)
+    window = _price_window_for(records)
+    close_df = _fetch_close_prices(*window) if window else pd.DataFrame()
+    bench_series = _fetch_benchmark_series(window[1], window[2]) if window else None
     results_by_horizon: dict[str, Any] = {}
 
     for h in horizons:
@@ -570,6 +906,7 @@ def _run_signals_backtest_sync(
             ),
             "top_tickers": _per_ticker_top(evals),
             "equity": _compute_equity_curve([(e.exit_date, e.adjusted_return_pct) for e in evals]),
+            "benchmark": _benchmark_for_evals(bench_series, evals),
         }
 
     total_evaluated = sum(
@@ -580,6 +917,8 @@ def _run_signals_backtest_sync(
         "source": "analysis_results",
         "lookback_days": lookback_days,
         "horizons": horizons,
+        "cost_bps": BACKTEST_COST_BPS,
+        "benchmark_ticker": BACKTEST_BENCHMARK_TICKER or None,
         "total_records": len(records),
         "total_evaluations": total_evaluated,
         "tickers_count": len({(r.get("ticker") or "").upper() for r in records if r.get("ticker")}),
@@ -713,12 +1052,22 @@ def _run_strategist_backtest_sync(
         )
     records = [_enrich_strategy_entry(dict(r)) for r in raw_records]
 
-    close_df = _download_prices_for(records)
+    window = _price_window_for(records)
+    close_df = _fetch_close_prices(*window) if window else pd.DataFrame()
     records = _resolve_actual_entry_prices(records, close_df)
+    # 손절/목표가 청산용 OHLC (활성 시) + 벤치마크 시계열
+    ohlc_frames = (
+        _fetch_ohlc_frames(window[0], window[1], window[2])
+        if window and BACKTEST_PLANNED_EXIT_ENABLED else {}
+    )
+    bench_series = _fetch_benchmark_series(window[1], window[2]) if window else None
     results_by_horizon: dict[str, Any] = {}
 
     for h in horizons:
-        evals = _evaluate_records(records, close_df, h, price_key="price", direction_key="direction")
+        evals = _evaluate_records(
+            records, close_df, h, price_key="price", direction_key="direction",
+            ohlc_frames=ohlc_frames, use_planned_exit=True,
+        )
         if not evals:
             results_by_horizon[str(h)] = _empty_horizon_block(h)
             continue
@@ -740,8 +1089,11 @@ def _run_strategist_backtest_sync(
                 evals,
                 lambda e: e.record.get("strategy_type"),
             ),
+            "by_exit_reason": _bucket_metrics(evals, lambda e: e.exit_reason, min_samples=1),
+            "exit_reason_counts": _count_exit_reasons(evals),
             "top_tickers": _per_ticker_top(evals),
             "equity": _compute_equity_curve([(e.exit_date, e.adjusted_return_pct) for e in evals]),
+            "benchmark": _benchmark_for_evals(bench_series, evals),
         }
 
     total_evaluated = sum(
@@ -752,6 +1104,9 @@ def _run_strategist_backtest_sync(
         "source": "strategy_history",
         "lookback_days": lookback_days,
         "horizons": horizons,
+        "cost_bps": BACKTEST_COST_BPS,
+        "benchmark_ticker": BACKTEST_BENCHMARK_TICKER or None,
+        "planned_exit_enabled": bool(ohlc_frames) and BACKTEST_PLANNED_EXIT_ENABLED,
         "total_records": len(records),
         "total_evaluations": total_evaluated,
         "tickers_count": len({(r.get("ticker") or "").upper() for r in records if r.get("ticker")}),
@@ -766,6 +1121,8 @@ def _empty_result(*, source, lookback_days, horizons, message) -> dict[str, Any]
         "source": source,
         "lookback_days": lookback_days,
         "horizons": horizons,
+        "cost_bps": BACKTEST_COST_BPS,
+        "benchmark_ticker": BACKTEST_BENCHMARK_TICKER or None,
         "total_records": 0,
         "total_evaluations": 0,
         "tickers_count": 0,
@@ -785,8 +1142,11 @@ def _empty_horizon_block(h: int) -> dict[str, Any]:
         "by_confidence": {},
         "by_market_regime": {},
         "by_strategy_type": {},
+        "by_exit_reason": {},
+        "exit_reason_counts": _count_exit_reasons([]),
         "top_tickers": [],
         "equity": _compute_equity_curve([]),
+        "benchmark": None,
     }
 
 
@@ -870,15 +1230,21 @@ def _pick_headline(result: dict[str, Any], horizon: int) -> dict[str, Any]:
     block = (result.get("results") or {}).get(str(horizon)) or {}
     overall = block.get("overall") or {}
     equity = block.get("equity") or {}
+    benchmark = block.get("benchmark") or {}
     return {
         "horizon": horizon,
         "hit_rate_pct": overall.get("hit_rate_pct"),
         "avg_return_pct": overall.get("avg_return_pct"),
         "sample_count": overall.get("count"),
+        "reliable": overall.get("reliable"),
         "profit_factor": overall.get("profit_factor"),
         "sharpe_ratio": equity.get("sharpe_ratio"),
+        "sortino_ratio": equity.get("sortino_ratio"),
+        "calmar_ratio": equity.get("calmar_ratio"),
+        "cagr_pct": equity.get("cagr_pct"),
         "max_drawdown_pct": equity.get("max_drawdown_pct"),
         "total_return_pct": equity.get("total_return_pct"),
+        "alpha_pct": benchmark.get("avg_alpha_pct"),
     }
 
 
@@ -923,6 +1289,9 @@ async def run_summary(
     return sanitize_for_json({
         "lookback_days": lb,
         "horizons": hs,
+        "cost_bps": BACKTEST_COST_BPS,
+        "benchmark_ticker": BACKTEST_BENCHMARK_TICKER or None,
+        "planned_exit_enabled": strat.get("planned_exit_enabled", False),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "signals": {
             "total_records": signals.get("total_records", 0),
@@ -993,12 +1362,23 @@ def _compute_live_positions(
     direction_key: str,
     price_key: str,
     extra_fields: list[str],
+    ohlc_frames: dict[str, pd.DataFrame] | None = None,
+    use_planned_exit: bool = False,
+    stop_key: str = "stop_loss",
+    target_keys: tuple[str, ...] = ("target1_price", "target2_price"),
 ) -> dict[str, dict[str, Any]]:
     """
     horizon별로 '아직 완료되지 않은(open)' 포지션을 수집해 현재가 대비 mark-to-market.
     동일 레코드가 여러 horizon에 걸쳐 open일 수 있으므로 각 horizon 블록에 개별 추가.
+
+    use_planned_exit(+ohlc_frames) 이면, 진입 이후 오늘까지 손절/목표가가 이미 닿은
+    포지션은 '계획대로라면 청산됐을' 것이므로 open 목록에서 제외하고 closed_by_plan 으로
+    집계한다 — 손절됐어야 할 종목이 거대한 미실현 손실로 보이는 왜곡을 막는다.
     """
     per_horizon: dict[int, list[dict[str, Any]]] = {h: [] for h in horizons}
+    closed_by_plan: dict[int, int] = {h: 0 for h in horizons}
+    planned = use_planned_exit and BACKTEST_PLANNED_EXIT_ENABLED and bool(ohlc_frames)
+    max_h = max(horizons) if horizons else 0
 
     for r in records:
         ticker = (r.get("ticker") or "").upper().strip()
@@ -1009,6 +1389,20 @@ def _compute_live_positions(
             continue
         if direction not in ("BUY", "SELL"):
             continue
+
+        # 손절/목표가가 이미 닿았는지 — 닿았으면 진입 이후 어느 horizon 에서도 open 아님
+        if planned:
+            _, _, reason = _planned_exit(
+                (ohlc_frames or {}).get(ticker), ticker, entry_dt, max_h,
+                direction, entry_price,
+                _safe_float(r.get(stop_key)), _pick_target_price(r, target_keys),
+            )
+            if reason is not None:
+                elapsed_for_count = _elapsed_trading_days(close_df, ticker, entry_dt)
+                for h in horizons:
+                    if elapsed_for_count < h:
+                        closed_by_plan[h] += 1
+                continue
 
         current_price, current_date = _latest_close(close_df, ticker)
         if current_price is None:
@@ -1026,7 +1420,7 @@ def _compute_live_positions(
             "current_price": _round(current_price, 4),
             "current_date": current_date.isoformat() if current_date else None,
             "unrealized_raw_pct": _round(raw_return, 2),
-            "unrealized_adjusted_pct": _round(adjusted, 2),
+            "unrealized_adjusted_pct": _round(_net_return_pct(adjusted), 2),
             "elapsed_trading_days": elapsed,
             **{k: r.get(k) for k in extra_fields if r.get(k) is not None},
         }
@@ -1061,6 +1455,7 @@ def _compute_live_positions(
             "horizon": h,
             "open_count": len(positions),
             "returned_count": len(capped),
+            "closed_by_plan_count": closed_by_plan[h],
             "overall": overall_open,
             "by_direction": {
                 d: _compute_metrics([
@@ -1091,6 +1486,13 @@ def _run_live_sync(lookback_days: int, horizons: list[int]) -> dict[str, Any]:
     # strategist 추천은 LLM 환각된 entry_zone 대신 실제 종가로 entry 보정
     strategy_records = _resolve_actual_entry_prices(strategy_records, close_df)
 
+    # strategist 손절/목표가 청산 평가용 OHLC (활성 시)
+    strat_window = _price_window_for(strategy_records)
+    strat_ohlc = (
+        _fetch_ohlc_frames(strat_window[0], strat_window[1], strat_window[2])
+        if strat_window and BACKTEST_PLANNED_EXIT_ENABLED else {}
+    )
+
     signals_live = _compute_live_positions(
         signals_records, close_df, horizons,
         direction_key="signal", price_key="price",
@@ -1101,11 +1503,14 @@ def _run_live_sync(lookback_days: int, horizons: list[int]) -> dict[str, Any]:
         direction_key="direction", price_key="price",
         extra_fields=["confidence", "strategy_type", "market_regime",
                       "stop_loss", "target1_price", "target2_price", "risk_reward_ratio"],
+        ohlc_frames=strat_ohlc, use_planned_exit=True,
     )
 
     return {
         "lookback_days": lookback_days,
         "horizons": horizons,
+        "cost_bps": BACKTEST_COST_BPS,
+        "planned_exit_enabled": bool(strat_ohlc) and BACKTEST_PLANNED_EXIT_ENABLED,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "elapsed_sec": round(time.time() - started, 2),
         "signals_live": {
@@ -1116,6 +1521,7 @@ def _run_live_sync(lookback_days: int, horizons: list[int]) -> dict[str, Any]:
         "strategist_live": {
             "source": "strategy_history",
             "total_open": sum(v["open_count"] for v in strategist_live.values()),
+            "total_closed_by_plan": sum(v["closed_by_plan_count"] for v in strategist_live.values()),
             "results": strategist_live,
         },
     }
@@ -1202,14 +1608,22 @@ def _build_trade_legs(
     price_key: str,
     leg_extra_fields: list[str],
     max_legs: int,
+    ohlc_frames: dict[str, pd.DataFrame] | None = None,
+    use_planned_exit: bool = False,
+    stop_key: str = "stop_loss",
+    target_keys: tuple[str, ...] = ("target1_price", "target2_price"),
 ) -> list[dict[str, Any]]:
     """
     그룹 내 각 종목을 포지션 leg로 변환. 평가 불가 종목은 제외.
     같은 (ticker, direction)이 여러 번 등장(여러 사이클의 같은 시그널)하면
     가장 이른 entry 만 한 leg 로 유지(중복 제거).
+
+    청산 우선순위: ① 손절/목표가(use_planned_exit) → ② horizon 종가 시간청산 →
+    ③ 미달 시 현재가 mark-to-market(open). return_pct 는 왕복 비용 차감 net.
     """
     legs: list[dict[str, Any]] = []
     seen_ticker_dir: set[tuple[str, str]] = set()
+    planned = use_planned_exit and BACKTEST_PLANNED_EXIT_ENABLED and bool(ohlc_frames)
     for r in group_records:
         if len(legs) >= max_legs:
             break
@@ -1227,14 +1641,35 @@ def _build_trade_legs(
             continue
         seen_ticker_dir.add(key)
 
-        # 1) 우선 horizon 만족하는 exit 시도(=closed)
-        exit_price, exit_date = _exit_price_after(close_df, ticker, entry_dt, horizon)
-        leg_status = "closed" if exit_price is not None else "open"
-        # 2) 미만족이면 최신 종가로 mark-to-market(=open)
+        exit_price: float | None = None
+        exit_date: date | None = None
+        leg_status = "open"
+        exit_reason = BACKTEST_EXIT_REASON_TIME
+
+        # 1) 손절/목표가 청산 (조기청산 포함)
+        if planned:
+            ep, ed, reason = _planned_exit(
+                (ohlc_frames or {}).get(ticker), ticker, entry_dt, horizon,
+                direction, entry_price,
+                _safe_float(r.get(stop_key)), _pick_target_price(r, target_keys),
+            )
+            if reason is not None:
+                exit_price, exit_date, leg_status, exit_reason = ep, ed, "closed", reason
+
+        # 2) horizon 만족하는 종가 시간청산(=closed)
+        if exit_price is None:
+            exit_price, exit_date = _exit_price_after(close_df, ticker, entry_dt, horizon)
+            if exit_price is not None:
+                leg_status = "closed"
+                exit_reason = BACKTEST_EXIT_REASON_TIME
+
+        # 3) 미만족이면 최신 종가로 mark-to-market(=open)
         if exit_price is None:
             exit_price, exit_date = _latest_close(close_df, ticker)
             if exit_price is None:
                 continue
+            leg_status = "open"
+            exit_reason = BACKTEST_EXIT_REASON_TIME
 
         raw_return = (exit_price - entry_price) / entry_price * 100.0
         adjusted = raw_return if direction == "BUY" else -raw_return
@@ -1246,8 +1681,9 @@ def _build_trade_legs(
             "exit_price": _round(exit_price, 4),
             "exit_date": exit_date.isoformat() if exit_date else None,
             "exit_status": leg_status,
+            "exit_reason": exit_reason,
             "raw_return_pct": _round(raw_return, 2),
-            "return_pct": _round(adjusted, 2),
+            "return_pct": _round(_net_return_pct(adjusted), 2),
         }
         for k in leg_extra_fields:
             v = r.get(k)
@@ -1269,6 +1705,8 @@ def _build_trade_from_group(
     leg_extra_fields: list[str],
     portfolio_extra_fields: list[str],
     max_legs: int,
+    ohlc_frames: dict[str, pd.DataFrame] | None = None,
+    use_planned_exit: bool = False,
 ) -> dict[str, Any] | None:
     if not group_records:
         return None
@@ -1277,6 +1715,7 @@ def _build_trade_from_group(
         group_records, close_df, horizon,
         direction_key=direction_key, price_key=price_key,
         leg_extra_fields=leg_extra_fields, max_legs=max_legs,
+        ohlc_frames=ohlc_frames, use_planned_exit=use_planned_exit,
     )
     if not legs:
         return None
@@ -1321,6 +1760,11 @@ def _build_trade_from_group(
         "winners_count": winners,
         "losers_count": losers,
         "legs_count": len(legs),
+        "exit_reason_counts": {
+            BACKTEST_EXIT_REASON_STOP: sum(1 for l in legs if l.get("exit_reason") == BACKTEST_EXIT_REASON_STOP),
+            BACKTEST_EXIT_REASON_TARGET: sum(1 for l in legs if l.get("exit_reason") == BACKTEST_EXIT_REASON_TARGET),
+            BACKTEST_EXIT_REASON_TIME: sum(1 for l in legs if l.get("exit_reason") == BACKTEST_EXIT_REASON_TIME),
+        },
         "legs": legs,
     }
 
@@ -1420,6 +1864,8 @@ def _run_trade_history_sync(
             "lookback_days": lookback_days,
             "include_open": include_open,
             "group_by": group_by,
+            "cost_bps": BACKTEST_COST_BPS,
+            "planned_exit_enabled": False,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "elapsed_sec": round(time.time() - started, 2),
             "summary": _summarize_trades([]),
@@ -1427,10 +1873,15 @@ def _run_trade_history_sync(
             "message": "평가할 레코드가 없습니다.",
         }
 
-    close_df = _download_prices_for(records)
+    window = _price_window_for(records)
+    close_df = _fetch_close_prices(*window) if window else pd.DataFrame()
+    use_planned_exit = source == "strategist"
+    ohlc_frames: dict[str, pd.DataFrame] = {}
     if source == "strategist":
         # LLM 환각된 entry_zone 대신 실제 종가로 entry 보정
         records = _resolve_actual_entry_prices(records, close_df)
+        if window and BACKTEST_PLANNED_EXIT_ENABLED:
+            ohlc_frames = _fetch_ohlc_frames(window[0], window[1], window[2])
 
     # group_by 윈도우 단위로 그룹핑.
     # day → 그날 들어온 모든 BUY/SELL 시그널이 한 trade(포트폴리오)
@@ -1452,6 +1903,7 @@ def _run_trade_history_sync(
             leg_extra_fields=leg_extra,
             portfolio_extra_fields=portfolio_extra,
             max_legs=BACKTEST_TRADES_MAX_LEGS_PER_TRADE,
+            ohlc_frames=ohlc_frames, use_planned_exit=use_planned_exit,
         )
         if trade is None:
             continue
@@ -1469,6 +1921,8 @@ def _run_trade_history_sync(
         "lookback_days": lookback_days,
         "include_open": include_open,
         "group_by": group_by,
+        "cost_bps": BACKTEST_COST_BPS,
+        "planned_exit_enabled": bool(ohlc_frames) and use_planned_exit,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "elapsed_sec": round(time.time() - started, 2),
         "summary": _summarize_trades(trades),
