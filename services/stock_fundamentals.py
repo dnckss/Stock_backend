@@ -7,6 +7,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, timedelta
 from typing import Any
 
 import pandas as pd
@@ -29,6 +31,21 @@ _cache: dict[str, tuple[float, dict[str, Any]]] = {}
 # yfinance 차단/rate limit 시 fallback 으로 쓰는 마지막 성공 데이터(영구 보관).
 _stale_store: dict[str, dict[str, Any]] = {}
 _cache_lock = threading.Lock()
+
+# single-flight — 같은 ticker 의 동시 cache-miss 요청을 1회 조회로 합친다.
+# (펀더멘털 7개 섹션 엔드포인트가 동시에 fetch_all_fundamentals 를 호출해도
+#  yfinance 조회는 한 번만 일어나도록. 티커별 락 + 이중검사 캐시.)
+_inflight_locks: dict[str, threading.Lock] = {}
+_inflight_master = threading.Lock()
+
+
+def _ticker_fetch_lock(ticker: str) -> threading.Lock:
+    with _inflight_master:
+        lock = _inflight_locks.get(ticker)
+        if lock is None:
+            lock = threading.Lock()
+            _inflight_locks[ticker] = lock
+        return lock
 
 
 def _get_cached(ticker: str) -> dict[str, Any] | None:
@@ -422,69 +439,107 @@ def _build_earnings(
     }
 
 
-def _build_price_performance(ticker: str) -> dict[str, Any]:
-    """기간별 등락률, 거래량, 거래대금 (1D / 5D / 1W / 1M / 1Y)."""
-    from services.yf_limiter import throttled
+# 기간 라벨 → 최신 거래일 기준 달력 오프셋 (price_performance 공용)
+_PRICE_PERF_OFFSETS: list[tuple[str, pd.DateOffset]] = [
+    ("1D", pd.DateOffset(days=1)),
+    ("5D", pd.DateOffset(days=7)),
+    ("1W", pd.DateOffset(weeks=1)),
+    ("1M", pd.DateOffset(months=1)),
+    ("1Y", pd.DateOffset(years=1)),
+]
+# 1Y 등락률을 산출하려면 DB 가 이만큼 과거를 덮어야 한다. 미달이면 yfinance fallback.
+_PRICE_PERF_DB_MIN_SPAN_DAYS = 360
+# DB 조회 범위 — 13개월 여유 (1Y + 영업일 갭 흡수)
+_PRICE_PERF_LOOKBACK_DAYS = 400
 
+
+def _price_performance_from_db(ticker: str) -> pd.DataFrame | None:
+    """price_history(DB)에서 최근 ~13개월 OHLCV. 1Y 커버 못 하면 None → yfinance fallback.
+
+    차트(fetch_chart)와 동일한 DB-first 패턴. 부트스트랩된 S&P 500 은 여기서 끝나
+    yfinance 13mo 다운로드(가장 무거운 호출)가 사라진다.
+    """
+    try:
+        from services.price_store import get_ohlcv_db
+        start = date.today() - timedelta(days=_PRICE_PERF_LOOKBACK_DAYS)
+        df = get_ohlcv_db(ticker, start=start)
+    except Exception as e:
+        logger.debug("price_performance DB 조회 실패 (%s): %s", ticker, e)
+        return None
+    if df is None or df.empty or len(df) < 2:
+        return None
+    span_days = (df.index.max() - df.index.min()).days
+    if span_days < _PRICE_PERF_DB_MIN_SPAN_DAYS:
+        return None  # 1Y 미커버(미보유/young/shallow) → yfinance 로
+    return df
+
+
+def _price_performance_from_yf(ticker: str) -> pd.DataFrame | None:
+    """yfinance 13mo 일봉 — DB 미보유/얕은 종목 fallback. 컬럼 소문자 정규화."""
+    from services.yf_limiter import throttled
     try:
         df = throttled(
             lambda: yf.download(ticker, period="13mo", interval="1d", progress=False)
         )
     except Exception as e:
         logger.debug("price_performance 다운로드 실패 (%s): %s", ticker, e)
-        return {"periods": []}
-
-    if df is None or df.empty or len(df) < 2:
-        return {"periods": []}
-
+        return None
+    if df is None or df.empty:
+        return None
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     # MultiIndex 해제 후 중복 컬럼 발생 시 첫 번째만 사용
     df = df.loc[:, ~df.columns.duplicated()]
+    return df.rename(columns={
+        "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume",
+    })
 
+
+def _compute_price_periods(df: pd.DataFrame | None) -> list[dict[str, Any]]:
+    """소문자 OHLCV df → 기간별 등락률·거래량·거래대금. DB·yfinance 경로 공용."""
+    if df is None or df.empty or len(df) < 2 or "close" not in df.columns:
+        return []
+    df = df.sort_index()
     latest_date = df.index[-1]
-    val = df["Close"].iloc[-1]
-    current_close = float(val.iloc[0]) if hasattr(val, "iloc") else float(val)
-
-    # (label, calendar offset from latest_date)
-    _offsets = [
-        ("1D", pd.DateOffset(days=1)),
-        ("5D", pd.DateOffset(days=7)),
-        ("1W", pd.DateOffset(weeks=1)),
-        ("1M", pd.DateOffset(months=1)),
-        ("1Y", pd.DateOffset(years=1)),
-    ]
+    current_close = _safe(df["close"].iloc[-1], 6)
+    if current_close is None:
+        return []
+    has_vol = "volume" in df.columns
 
     periods: list[dict[str, Any]] = []
-    for label, offset in _offsets:
+    for label, offset in _PRICE_PERF_OFFSETS:
         target_date = latest_date - offset
-        # target_date 이후의 가장 오래된 거래일 찾기
-        mask = df.index >= target_date
+        mask = df.index >= target_date  # target 이후 가장 오래된 거래일
         if not mask.any():
-            periods.append({
-                "label": label,
-                "change_pct": None,
-                "volume": None,
-                "trading_value": None,
-            })
+            periods.append({"label": label, "change_pct": None, "volume": None, "trading_value": None})
             continue
 
         period_df = df.loc[mask]
-        pv = period_df["Close"].iloc[0]
-        past_close = float(pv.iloc[0]) if hasattr(pv, "iloc") else float(pv)
+        past_close = _safe(period_df["close"].iloc[0], 6)
         change_pct = _safe((current_close - past_close) / past_close * 100, 2) if past_close else None
 
-        vol = period_df["Volume"].sum()
-        tv = (period_df["Close"] * period_df["Volume"]).sum()
-
+        vol = period_df["volume"].sum() if has_vol else None
+        tv = (period_df["close"] * period_df["volume"]).sum() if has_vol else None
         periods.append({
             "label": label,
             "change_pct": change_pct,
-            "volume": int(vol) if not pd.isna(vol) else None,
-            "trading_value": _safe(tv, 0),
+            "volume": int(vol) if vol is not None and not pd.isna(vol) else None,
+            "trading_value": _safe(tv, 0) if tv is not None else None,
         })
 
-    return {"periods": periods}
+    return periods
+
+
+def _build_price_performance(ticker: str) -> dict[str, Any]:
+    """기간별 등락률·거래량·거래대금 (1D/5D/1W/1M/1Y).
+
+    price_history(DB) 우선 — 차트와 동일한 DB-first. DB 가 1Y 를 못 덮으면
+    (미보유/young/shallow) yfinance 13mo 일봉으로 fallback.
+    """
+    df = _price_performance_from_db(ticker)
+    if df is None:
+        df = _price_performance_from_yf(ticker)
+    return {"periods": _compute_price_periods(df)}
 
 
 # ---------------------------------------------------------------------------
@@ -508,17 +563,42 @@ def fetch_all_fundamentals(ticker: str) -> dict[str, Any]:
     """
     전체 펀더멘털 데이터를 한 번에 조회한다.
     - TTL 캐시 hit 시 즉시 반환
+    - cache-miss 시 single-flight: 같은 ticker 동시 요청은 한 번만 실제 조회
     - yfinance 차단으로 빈 응답이 오면 캐시 저장 안 하고 직전 성공 데이터(stale) 반환
     """
     cached = _get_cached(ticker)
     if cached is not None:
         return cached
 
-    t = yf.Ticker(ticker)
-    info = _fetch_info(t)
-    qf = _fetch_quarterly_financials(t)
-    qbs = _fetch_quarterly_balance_sheet(t)
-    ed = _fetch_earnings_dates(t)
+    # single-flight: 락 대기 중 다른 스레드가 채웠으면 그 결과를 공유(이중검사).
+    lock = _ticker_fetch_lock(ticker)
+    with lock:
+        cached = _get_cached(ticker)
+        if cached is not None:
+            return cached
+        return _fetch_all_fundamentals_uncached(ticker)
+
+
+def _fetch_all_fundamentals_uncached(ticker: str) -> dict[str, Any]:
+    """실제 조회 — 독립적인 yfinance 호출 5개를 병렬 실행 후 조립.
+
+    info / quarterly_financials / quarterly_balance_sheet / earnings_dates /
+    price_performance 는 서로 의존성이 없어 동시에 받는다. 각 호출은 yf_limiter
+    의 throttled(세마포어=YF_GLOBAL_CONCURRENCY, 최소간격)로 rate limit 이 제어되므로
+    벽시계 시간이 '합'에서 '최댓값'으로 줄어든다. (Ticker 객체는 호출별로 분리해 동시
+    속성 접근 경합을 피한다.)
+    """
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        f_info = ex.submit(_fetch_info, yf.Ticker(ticker))
+        f_qf = ex.submit(_fetch_quarterly_financials, yf.Ticker(ticker))
+        f_qbs = ex.submit(_fetch_quarterly_balance_sheet, yf.Ticker(ticker))
+        f_ed = ex.submit(_fetch_earnings_dates, yf.Ticker(ticker))
+        f_pp = ex.submit(_build_price_performance, ticker)
+        info = f_info.result()
+        qf = f_qf.result()
+        qbs = f_qbs.result()
+        ed = f_ed.result()
+        price_performance = f_pp.result()
 
     data = {
         "profile": _build_profile(info, ticker=ticker),
@@ -527,7 +607,7 @@ def fetch_all_fundamentals(ticker: str) -> dict[str, Any]:
         "growth": _build_growth(qf),
         "stability": _build_stability(qbs),
         "earnings": _build_earnings(info, ed),
-        "price_performance": _build_price_performance(ticker),
+        "price_performance": price_performance,
     }
 
     if _is_empty_fundamentals(data):
