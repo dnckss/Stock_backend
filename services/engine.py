@@ -28,6 +28,7 @@ from services.scanner import (
     refresh_intraday_prices,
     merge_intraday_into_candidates,
     backfill_missing_returns,
+    backfill_missing_volume,
     ensure_sp500_coverage,
 )
 from services.sentiment import analyze_sentiments
@@ -291,6 +292,21 @@ async def run_price_tick_loop():
             if live:
                 merge_intraday_into_candidates(latest_cache.get("top_picks") or [], live)
                 merge_intraday_into_candidates(latest_cache.get("radar") or [], live)
+
+                # 라이브 3경로가 모두 놓친 종목의 VOL·거래대금을 price_history DB last
+                # 일봉으로 보강(placeholder 면 price·일봉도). 등락률 backfill 보다 먼저
+                # 실행해 채워진 price 를 등락률 계산이 활용하게 한다.
+                vol_top = await asyncio.to_thread(
+                    backfill_missing_volume, latest_cache.get("top_picks") or [],
+                )
+                vol_radar = await asyncio.to_thread(
+                    backfill_missing_volume, latest_cache.get("radar") or [],
+                )
+                if vol_top + vol_radar:
+                    logger.info(
+                        "VOL·거래대금 DB backfill: %d개 종목 보강 (top=%d radar=%d)",
+                        vol_top + vol_radar, vol_top, vol_radar,
+                    )
 
                 # _preserve_or_restore_snapshot 으로 placeholder(daily=[])가 남은 종목들의
                 # 5일 등락률을 price_history DB 에서 batch 보강한다.

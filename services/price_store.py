@@ -224,11 +224,12 @@ def get_ohlc_prices_db(
     start: date,
     end: date,
 ) -> dict[str, pd.DataFrame]:
-    """price_history 에서 (ticker, date) 범위의 OHLC 를 ticker별 DataFrame 으로 반환한다.
+    """price_history 에서 (ticker, date) 범위의 OHLCV 를 ticker별 DataFrame 으로 반환한다.
 
-    반환: {TICKER: DataFrame(index=DatetimeIndex, columns=[open, high, low, close])}.
+    반환: {TICKER: DataFrame(index=DatetimeIndex, columns=[open, high, low, close, volume])}.
     종가 전용 경로(get_close_prices_db)와 분리한 이유 — 손절/목표가 intrabar 청산
-    평가에는 고가(high)·저가(low)가 필요하기 때문. 조회 실패/빈 결과면 빈 dict.
+    평가에는 고가(high)·저가(low)가, 스캐너 VOL 백필에는 volume 이 필요하기 때문.
+    (백테스트 _planned_exit 는 volume 컬럼을 무시한다.) 조회 실패/빈 결과면 빈 dict.
     """
     if not tickers:
         return {}
@@ -245,7 +246,7 @@ def get_ohlc_prices_db(
         try:
             resp = (
                 client.table(_TABLE)
-                .select("ticker, date, open, high, low, close")
+                .select("ticker, date, open, high, low, close, volume")
                 .in_("ticker", uppers)
                 .gte("date", start.isoformat())
                 .lte("date", end.isoformat())
@@ -271,7 +272,7 @@ def get_ohlc_prices_db(
         frame = (
             grp.drop_duplicates(subset="date", keep="last")
             .set_index("date")
-            .sort_index()[["open", "high", "low", "close"]]
+            .sort_index()[["open", "high", "low", "close", "volume"]]
         )
         out[str(ticker).upper()] = frame
     return out

@@ -527,7 +527,10 @@ def _refresh_intraday_prices_batch(tickers: list[str]) -> dict[str, dict]:
                     volume_series = frame["Volume"].dropna()
                     if not volume_series.empty:
                         try:
-                            volume = float(volume_series.iloc[-1])
+                            # 당일 누적 거래량 — period=1d 의 모든 분봉 합.
+                            # (마지막 1개 봉 거래량을 쓰면 일봉 volume 을 덮어쓸 때
+                            #  VOL 이 '마지막 N분 거래량'으로 작아진다.)
+                            volume = float(volume_series.sum())
                             volume_int = int(volume) if math.isfinite(volume) else None
                         except (TypeError, ValueError, OverflowError):
                             volume_int = None
@@ -705,6 +708,90 @@ def backfill_missing_returns(candidates: list[dict]) -> int:
             if not (math.isfinite(base) and math.isfinite(now_px)) or base == 0:
                 continue
             c["return"] = round((now_px - base) / base, 6)
+            filled += 1
+        except Exception:
+            continue
+
+    return filled
+
+
+def _daily_bars_from_frame(frame: pd.DataFrame, keep: int = SCAN_TRADING_DAYS) -> list[dict]:
+    """price_history OHLCV 프레임(소문자 컬럼) → 스캔 일봉 bar 리스트(최근 keep개)."""
+    bars: list[dict] = []
+    tail = frame.tail(keep) if len(frame) > keep else frame
+    for idx, row in tail.iterrows():
+        c = row.get("close")
+        if c is None or pd.isna(c):
+            continue
+        ts = idx if hasattr(idx, "strftime") else pd.Timestamp(idx)
+        o, h, l_, v = row.get("open"), row.get("high"), row.get("low"), row.get("volume")
+        bars.append({
+            "date": ts.strftime("%Y-%m-%d"),
+            "open": round(float(o), 2) if o is not None and not pd.isna(o) else None,
+            "high": round(float(h), 2) if h is not None and not pd.isna(h) else None,
+            "low": round(float(l_), 2) if l_ is not None and not pd.isna(l_) else None,
+            "close": round(float(c), 2),
+            "volume": int(v) if v is not None and not pd.isna(v) else 0,
+        })
+    return bars
+
+
+def backfill_missing_volume(candidates: list[dict]) -> int:
+    """volume(거래량)이 비어있는 종목을 price_history DB 의 마지막 일봉으로 채운다.
+
+    VOL·거래대금은 라이브 yfinance 3경로(일봉 스캔 → 분봉 틱 → fast_info)로만 채워져,
+    한 사이클에 세 경로가 모두 놓친 종목은 DB 에 값이 있어도 빈칸으로 남는다.
+    이 함수가 그런 종목의 volume 을 DB last 일봉 거래량으로 메우고, price 가 없으면
+    (placeholder) last 종가·일봉도 함께 채워 거래대금(price×volume)·등락률까지 복구한다.
+    차트·펀더멘털과 동일한 DB-first 폴백을 마켓 테이블에도 적용하는 것.
+
+    Returns: 보강된 종목 수.
+    """
+    if not candidates:
+        return 0
+
+    missing = [c for c in candidates if c.get("volume") is None and c.get("ticker")]
+    if not missing:
+        return 0
+
+    tickers = sorted({(c.get("ticker") or "").upper().strip() for c in missing if c.get("ticker")})
+    if not tickers:
+        return 0
+
+    end = datetime.now().date()
+    start = end - timedelta(days=14)  # last 일봉 + 5일 등락률용 윈도우
+    try:
+        from services.price_store import get_ohlc_prices_db
+        frames = get_ohlc_prices_db(tickers, start, end)
+    except Exception as e:
+        logger.warning("backfill_missing_volume: get_ohlc_prices_db 실패: %s", e)
+        return 0
+    if not frames:
+        return 0
+
+    filled = 0
+    for c in missing:
+        t = (c.get("ticker") or "").upper().strip()
+        frame = frames.get(t)
+        if frame is None or frame.empty:
+            continue
+        try:
+            last = frame.iloc[-1]
+            vol = last.get("volume")
+            if vol is None or pd.isna(vol):
+                continue
+            vol_int = int(vol)
+            c["volume"] = vol_int
+            c["liquidity_ok"] = vol_int >= MIN_VOLUME
+            # placeholder(가격 없음)면 종가·일봉도 DB 로 채워 거래대금/등락률 복구
+            if c.get("price") is None:
+                close = last.get("close")
+                if close is not None and not pd.isna(close):
+                    c["price"] = round(float(close), 2)
+                    c["price_available"] = True
+            if not c.get("daily"):
+                c["daily"] = _daily_bars_from_frame(frame)
+            c["volume_source"] = "price_history_db"
             filled += 1
         except Exception:
             continue
