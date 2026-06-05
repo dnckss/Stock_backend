@@ -237,16 +237,21 @@ def _paginate_keyset(
     *,
     page_size: int = _BACKTEST_KEYSET_PAGE_SIZE,
     cursor_col: str = "created_at",
-    id_col: str = "id",
+    dedup_key=lambda r: r.get("id"),
 ) -> list[dict]:
     """
     keyset(커서) 페이지네이션 — offset 의 '깊은 페이지 재스캔/정렬' 비용을 제거한다.
 
-    build_fn(client, cursor) 는 ``.gte(cursor_col, cursor or cutoff)`` +
-    ``.order(cursor_col).order(id_col)`` 까지 체이닝된 쿼리를 반환해야 한다(여기서 .limit 만 덧붙임).
+    build_fn(client, cursor) 는 ``.gte(cursor_col, cursor or cutoff)`` + 보조정렬까지
+    체이닝된 쿼리를 반환해야 한다(여기서 .limit 만 덧붙임).
+
+    dedup_key(row): 행의 '전역 고유 식별자'를 반환(경계 tie 재조회분 중복 제거용).
+      - id 컬럼이 있으면 ``lambda r: r["id"]``.
+      - id 가 없어도 (created_at, ticker) 처럼 행을 유일하게 식별하는 조합이면 그것을 사용
+        (analysis_results 는 스캔 1사이클이 ticker 당 1행이라 (created_at, ticker) 가 유일).
 
     같은 cursor_col 값이 한 배치(예: 스캔 1사이클 ≈ S&P500 ~503행)로 묶여 동률(tie)이 많으므로,
-    커서를 마지막 행의 cursor_col 로 '포함(gte)' 전진시키고 id 로 중복을 제거한다 —
+    커서를 마지막 행의 cursor_col 로 '포함(gte)' 전진시키고 dedup_key 로 중복을 제거한다 —
     경계의 tie 배치를 다음 페이지가 다시 받아 dedup 하므로 누락이 없다.
 
     한 페이지가 전부 동일 cursor 값(tie ≥ effective page)이면 gte 로 전진할 수 없으므로,
@@ -259,7 +264,7 @@ def _paginate_keyset(
     import httpx
 
     collected: list[dict] = []
-    seen_ids: set = set()
+    seen_keys: set = set()
     cursor: str | None = None
     effective_page = page_size
 
@@ -300,9 +305,9 @@ def _paginate_keyset(
         if not rows:
             break
 
-        fresh = [r for r in rows if r.get(id_col) not in seen_ids]
+        fresh = [r for r in rows if dedup_key(r) not in seen_keys]
         for r in fresh:
-            seen_ids.add(r.get(id_col))
+            seen_keys.add(dedup_key(r))
         collected.extend(fresh)
 
         if len(rows) < effective_page:
@@ -341,7 +346,7 @@ def get_analysis_records_for_backtest(
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     cols = (
-        "id, ticker, price, volume, divergence, sentiment, price_return, "
+        "ticker, price, volume, divergence, sentiment, price_return, "
         "signal, signal_source, created_at"
     )
     allowed = (
@@ -359,9 +364,13 @@ def get_analysis_records_for_backtest(
         )
         if allowed:
             q = q.in_("signal", allowed)
-        return q.order("created_at", desc=False).order("id", desc=False)
+        # id 컬럼 의존 없이 (created_at, ticker) 로 보조정렬·dedup — 스캔 1사이클은
+        # ticker 당 1행이라 이 조합이 전역 유일.
+        return q.order("created_at", desc=False).order("ticker", desc=False)
 
-    return _sanitize(_paginate_keyset(_build))
+    return _sanitize(_paginate_keyset(
+        _build, dedup_key=lambda r: (r.get("created_at"), r.get("ticker")),
+    ))
 
 
 def get_strategy_records_for_backtest(days: int) -> list[dict]:
