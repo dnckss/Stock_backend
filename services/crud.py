@@ -163,10 +163,15 @@ def get_all_records(limit: int = 100) -> list:
 
 # Supabase statement timeout(57014) 회피: 페이지당 행 수를 줄여 각 쿼리가 더 빨리 끝나게 한다.
 # 1000 → 500 → 250 으로 계속 줄여, 페이지가 깊어져도 각 쿼리 자체는 timeout 회피.
+# (offset 방식 — _paginate. 백테스트 레코드 읽기는 _paginate_keyset 으로 전환됨.)
 _BACKTEST_PAGE_SIZE = 250
 _BACKTEST_MAX_PAGES = 200  # 최대 50,000건 유지 (페이지 사이즈 1/4 → 페이지 상한 4배)
 _BACKTEST_PAGE_MAX_RETRIES = 3
 _BACKTEST_PAGE_RETRY_BASE_SEC = 0.5
+# keyset(커서) 페이지네이션 — 깊은 offset 재스캔이 없어 페이지를 크게 잡아도 안전(타임아웃 회피).
+_BACKTEST_KEYSET_PAGE_SIZE = 1000
+# 단일 cursor 값 tie 가 페이지를 넘을 때 페이지를 키우는 상한(데이터 누락 방지 안전망).
+_BACKTEST_KEYSET_MAX_PAGE = 50000
 
 
 def _paginate(query_builder_fn, *, select_cols: str) -> list[dict]:
@@ -227,6 +232,102 @@ def _paginate(query_builder_fn, *, select_cols: str) -> list[dict]:
     return collected
 
 
+def _paginate_keyset(
+    build_fn,
+    *,
+    page_size: int = _BACKTEST_KEYSET_PAGE_SIZE,
+    cursor_col: str = "created_at",
+    id_col: str = "id",
+) -> list[dict]:
+    """
+    keyset(커서) 페이지네이션 — offset 의 '깊은 페이지 재스캔/정렬' 비용을 제거한다.
+
+    build_fn(client, cursor) 는 ``.gte(cursor_col, cursor or cutoff)`` +
+    ``.order(cursor_col).order(id_col)`` 까지 체이닝된 쿼리를 반환해야 한다(여기서 .limit 만 덧붙임).
+
+    같은 cursor_col 값이 한 배치(예: 스캔 1사이클 ≈ S&P500 ~503행)로 묶여 동률(tie)이 많으므로,
+    커서를 마지막 행의 cursor_col 로 '포함(gte)' 전진시키고 id 로 중복을 제거한다 —
+    경계의 tie 배치를 다음 페이지가 다시 받아 dedup 하므로 누락이 없다.
+
+    한 페이지가 전부 동일 cursor 값(tie ≥ effective page)이면 gte 로 전진할 수 없으므로,
+    그 tie 를 한 번에 포섭할 때까지 페이지 크기를 키워 재조회한다(데이터 누락 방지).
+    실제 tie 는 ~503 < 1000 이라 이 경로는 거의 타지 않지만, 안전망으로 둔다.
+
+    httpx 일시 오류는 _paginate 와 동일하게 지수 백오프 재시도하고, 최종 실패 시 부분 결과 반환.
+    """
+    import time
+    import httpx
+
+    collected: list[dict] = []
+    seen_ids: set = set()
+    cursor: str | None = None
+    effective_page = page_size
+
+    for _ in range(_BACKTEST_MAX_PAGES):
+        rows: list[dict] | None = None
+        last_exc: Exception | None = None
+        for attempt in range(_BACKTEST_PAGE_MAX_RETRIES):
+            try:
+                client = _get_client()
+                resp = build_fn(client, cursor).limit(effective_page).execute()
+                rows = resp.data or []
+                break
+            except (
+                httpx.RemoteProtocolError,
+                httpx.ReadError,
+                httpx.WriteError,
+                httpx.ConnectError,
+                httpx.ReadTimeout,
+                httpx.ConnectTimeout,
+            ) as e:
+                last_exc = e
+                logger.warning(
+                    "paginate_keyset 네트워크 오류(%s): %s", type(e).__name__, e,
+                )
+                _reset_client()
+                time.sleep(_BACKTEST_PAGE_RETRY_BASE_SEC * (2 ** attempt))
+            except Exception as e:
+                last_exc = e
+                logger.warning("paginate_keyset API 오류: %s", e)
+                time.sleep(_BACKTEST_PAGE_RETRY_BASE_SEC * (2 ** attempt))
+
+        if rows is None:
+            logger.error(
+                "paginate_keyset 최종 실패 — 지금까지 수집 %d건으로 진행: %s",
+                len(collected), last_exc,
+            )
+            break
+        if not rows:
+            break
+
+        fresh = [r for r in rows if r.get(id_col) not in seen_ids]
+        for r in fresh:
+            seen_ids.add(r.get(id_col))
+        collected.extend(fresh)
+
+        if len(rows) < effective_page:
+            break  # 마지막 페이지
+
+        first_cursor = rows[0].get(cursor_col)
+        last_cursor = rows[-1].get(cursor_col)
+        if first_cursor == last_cursor:
+            # 페이지 전체가 단일 cursor 값(tie ≥ effective_page) → 커서 전진 불가.
+            # 페이지를 키워 tie 전체를 한 번에 받는다(누락 방지). 상한 도달 시 중단.
+            if effective_page >= _BACKTEST_KEYSET_MAX_PAGE:
+                logger.warning(
+                    "paginate_keyset: 단일 cursor tie 가 %d행 초과 — 중단",
+                    _BACKTEST_KEYSET_MAX_PAGE,
+                )
+                break
+            effective_page = min(effective_page * 2, _BACKTEST_KEYSET_MAX_PAGE)
+            continue  # cursor 유지, 더 크게 재조회
+
+        effective_page = page_size  # tie 해소 — 기본 페이지로 복귀
+        cursor = last_cursor
+
+    return collected
+
+
 def get_analysis_records_for_backtest(
     days: int,
     directions: list[str] | None = None,
@@ -240,7 +341,7 @@ def get_analysis_records_for_backtest(
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     cols = (
-        "ticker, price, volume, divergence, sentiment, price_return, "
+        "id, ticker, price, volume, divergence, sentiment, price_return, "
         "signal, signal_source, created_at"
     )
     allowed = (
@@ -248,19 +349,19 @@ def get_analysis_records_for_backtest(
         if directions else None
     )
 
-    def _build(client):
+    def _build(client, cursor):
         q = (
             client.table("analysis_results")
             .select(cols)
-            .gte("created_at", cutoff)
+            .gte("created_at", cursor or cutoff)
             .not_.is_("signal", "null")
             .not_.is_("price", "null")
         )
         if allowed:
             q = q.in_("signal", allowed)
-        return q.order("created_at", desc=False)
+        return q.order("created_at", desc=False).order("id", desc=False)
 
-    return _sanitize(_paginate(_build, select_cols=cols))
+    return _sanitize(_paginate_keyset(_build))
 
 
 def get_strategy_records_for_backtest(days: int) -> list[dict]:
@@ -275,16 +376,17 @@ def get_strategy_records_for_backtest(days: int) -> list[dict]:
         "market_regime, created_at"
     )
 
-    def _build(client):
+    def _build(client, cursor):
         return (
             client.table("strategy_history")
             .select(cols)
-            .gte("created_at", cutoff)
+            .gte("created_at", cursor or cutoff)
             .not_.is_("direction", "null")
             .order("created_at", desc=False)
+            .order("id", desc=False)
         )
 
-    return _sanitize(_paginate(_build, select_cols=cols))
+    return _sanitize(_paginate_keyset(_build))
 
 
 def get_cached_news_article(url_hash: str) -> dict | None:
