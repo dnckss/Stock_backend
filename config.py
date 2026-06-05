@@ -602,6 +602,21 @@ BACKTEST_RELIABLE_MIN_SAMPLES = int(os.getenv("BACKTEST_RELIABLE_MIN_SAMPLES", "
 # 비현실적으로 폭증(예: 며칠 만의 큰 수익을 1년으로 외삽)하므로 미만이면 CAGR/Calmar=None.
 BACKTEST_CAGR_MIN_SPAN_DAYS = int(os.getenv("BACKTEST_CAGR_MIN_SPAN_DAYS", "20"))
 
+# --- 응답 지연 SLA: stale-while-revalidate (SWR) + 파일 영속화 ---
+# 백테스트 페이지 진입은 항상 즉시 응답해야 한다(목표 ≤3s). 캐시가 신선하면 즉시 반환,
+# soft TTL(BACKTEST_CACHE_TTL_SEC) 초과 + MAX_STALE 이내면 '직전 결과를 즉시 반환 +
+# 백그라운드 재계산'(사용자는 재계산을 기다리지 않음). MAX_STALE 초과/캐시 없음이면 동기 계산.
+BACKTEST_SWR_ENABLED = _bool_env("BACKTEST_SWR_ENABLED", "true")
+# 완료 백테스트(과거 분석)는 하루 정도 stale 허용해도 무방 — 자동 워밍이 25분마다 갱신.
+BACKTEST_SWR_MAX_STALE_SEC = int(os.getenv("BACKTEST_SWR_MAX_STALE_SEC", "86400"))  # 1일
+# 라이브(진행 중 포지션)는 현재가 mark-to-market 이라 stale 허용을 짧게 — 그 이상이면 동기 계산.
+BACKTEST_LIVE_SWR_MAX_STALE_SEC = int(os.getenv("BACKTEST_LIVE_SWR_MAX_STALE_SEC", "600"))  # 10분
+# 결과 캐시 로컬 파일 영속화 — 프로세스 재시작 후 첫 진입도 스냅샷으로 즉답(+백그라운드 갱신).
+BACKTEST_PERSIST_ENABLED = _bool_env("BACKTEST_PERSIST_ENABLED", "true")
+BACKTEST_PERSIST_PATH = os.getenv("BACKTEST_PERSIST_PATH", ".backtest_cache.json")
+# 파일 쓰기 디바운스(초) — 잦은 put/refresh 에도 디스크 쓰기는 이 간격 이상으로 제한.
+BACKTEST_PERSIST_DEBOUNCE_SEC = int(os.getenv("BACKTEST_PERSIST_DEBOUNCE_SEC", "5"))
+
 # ---------------------------------------------------------------------------
 # AI Chat (종목 질의 챗봇, SSE 스트리밍)
 # ---------------------------------------------------------------------------

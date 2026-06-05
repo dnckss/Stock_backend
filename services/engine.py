@@ -428,7 +428,8 @@ async def run_backtest_warmup_loop():
     워밍 대상:
       - run_summary  : signals/strategist 백테스트 헤드라인
       - run_trade_history(strategist|signals) : 진입→청산 거래 내역
-      - live 는 1분 TTL 짧아서 워밍 의미 없으므로 제외 (사용자 호출 시 fresh 산출)
+      - run_live_positions : 진행 중 포지션 — SWR 가 stale 도 즉시 주므로 워밍해두면
+        진입 시 1분 TTL 만료 후에도 직전 결과 즉답(+백그라운드 갱신)된다.
     """
     from config import (
         BACKTEST_AUTO_WARMUP_ENABLED,
@@ -445,7 +446,7 @@ async def run_backtest_warmup_loop():
     # 서버 기동 직후 다른 초기 작업과 충돌 회피
     await asyncio.sleep(max(0, BACKTEST_AUTO_WARMUP_INITIAL_DELAY_SEC))
 
-    from services.backtest import run_summary, run_trade_history
+    from services.backtest import run_summary, run_trade_history, run_live_positions
 
     step_delay = max(0, BACKTEST_WARMUP_STEP_DELAY_SEC)
     failures = 0
@@ -476,6 +477,16 @@ async def run_backtest_warmup_loop():
                     logger.info("  · trades(%s) 워밍 완료", source)
                 except Exception as e:
                     logger.warning("  · trades(%s) 워밍 실패: %s", source, e)
+
+            # 3) live — 진행 중 포지션. SWR 가 stale 도 즉시 주므로 캐시를 채워두면
+            #    진입 시 1분 TTL 만료 뒤에도 직전 결과로 즉답된다.
+            if step_delay:
+                await asyncio.sleep(step_delay)
+            try:
+                await run_live_positions(refresh=True)
+                logger.info("  · live 워밍 완료")
+            except Exception as e:
+                logger.warning("  · live 워밍 실패: %s", e)
 
             elapsed = (datetime.now() - start).total_seconds()
             logger.info("백테스트 자동 워밍 종료 (%.1fs)", elapsed)

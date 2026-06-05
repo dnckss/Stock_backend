@@ -30,3 +30,6 @@ htmlcov/
 # Uploads / runtime artifacts
 chat_files/
 *.log
+
+# 백테스트 SWR 결과 캐시(로컬 영속화)
+.backtest_cache.json

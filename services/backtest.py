@@ -22,14 +22,16 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import math
+import os
 import statistics
 import threading
 import time
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Iterable
+from typing import Any, Awaitable, Callable, Iterable
 
 import pandas as pd
 
@@ -39,6 +41,12 @@ from config import (
     BACKTEST_CACHE_TTL_SEC,
     BACKTEST_CAGR_MIN_SPAN_DAYS,
     BACKTEST_COST_BPS,
+    BACKTEST_LIVE_SWR_MAX_STALE_SEC,
+    BACKTEST_PERSIST_DEBOUNCE_SEC,
+    BACKTEST_PERSIST_ENABLED,
+    BACKTEST_PERSIST_PATH,
+    BACKTEST_SWR_ENABLED,
+    BACKTEST_SWR_MAX_STALE_SEC,
     BACKTEST_DEFAULT_HORIZONS,
     BACKTEST_DEFAULT_LOOKBACK_DAYS,
     BACKTEST_DIVERGENCE_BUCKETS,
@@ -1154,7 +1162,17 @@ def _empty_horizon_block(h: int) -> dict[str, Any]:
 # 캐시 + Public API
 # ---------------------------------------------------------------------------
 
+# 완료 백테스트(signals/strategist/trades) 결과 캐시. 파일 영속화 대상.
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+# SWR 백그라운드 갱신 단일비행 가드 — 같은 key 의 중복 재계산 방지.
+_refreshing: set[str] = set()
+_refresh_guard = threading.Lock()
+
+# 파일 영속화 상태 — 디바운스 타임스탬프 + 1회 복원 플래그(모두 lock 하에).
+_persist_lock = threading.Lock()
+_last_persist_ts: float = 0.0
+_restored = False
 
 
 def _cache_key(kind: str, lookback_days: int, horizons: list[int]) -> str:
@@ -1162,19 +1180,144 @@ def _cache_key(kind: str, lookback_days: int, horizons: list[int]) -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
-def _cache_get(key: str) -> dict[str, Any] | None:
-    entry = _cache.get(key)
+# ---------------------------------------------------------------------------
+# 파일 영속화 — 재시작 후 첫 진입도 스냅샷으로 즉답(stale) 후 백그라운드 갱신.
+# 결과는 이미 sanitize_for_json 통과한 JSON 호환 dict 라 그대로 직렬화 가능.
+# ---------------------------------------------------------------------------
+
+def _persist_soon() -> None:
+    """_cache 스냅샷을 디바운스해 로컬 파일로 저장(best-effort)."""
+    if not BACKTEST_PERSIST_ENABLED:
+        return
+    global _last_persist_ts
+    with _persist_lock:
+        now = time.time()
+        if now - _last_persist_ts < max(0, BACKTEST_PERSIST_DEBOUNCE_SEC):
+            return
+        _last_persist_ts = now
+        snapshot = {k: {"ts": ts, "data": d} for k, (ts, d) in _cache.items()}
+    try:
+        tmp = f"{BACKTEST_PERSIST_PATH}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, ensure_ascii=False)
+        os.replace(tmp, BACKTEST_PERSIST_PATH)  # 원자적 교체 — 부분쓰기로 깨진 파일 방지
+    except Exception as e:
+        logger.warning("백테스트 캐시 영속화 실패: %s", e)
+
+
+def _ensure_restored() -> None:
+    """프로세스 첫 접근 시 1회 — 파일 스냅샷을 _cache 로 복원(원래 ts 유지 → SWR 가 stale 판정)."""
+    global _restored
+    if _restored:
+        return
+    with _persist_lock:
+        if _restored:
+            return
+        _restored = True
+        if not BACKTEST_PERSIST_ENABLED:
+            return
+        try:
+            if not os.path.exists(BACKTEST_PERSIST_PATH):
+                return
+            with open(BACKTEST_PERSIST_PATH, encoding="utf-8") as f:
+                snapshot = json.load(f)
+            restored = 0
+            for k, v in (snapshot or {}).items():
+                try:
+                    _cache[k] = (float(v["ts"]), v["data"])
+                    restored += 1
+                except (KeyError, TypeError, ValueError):
+                    continue
+            if restored:
+                logger.info("백테스트 캐시 복원: %d개 키 (%s)", restored, BACKTEST_PERSIST_PATH)
+        except Exception as e:
+            logger.warning("백테스트 캐시 복원 실패: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Stale-While-Revalidate — 진입은 항상 즉시 응답, 재계산은 백그라운드.
+# ---------------------------------------------------------------------------
+
+def _swr_lookup(
+    cache: dict[str, tuple[float, dict[str, Any]]],
+    key: str,
+    ttl: int,
+    max_stale: int,
+    *,
+    refresh: bool,
+) -> tuple[str, dict[str, Any] | None]:
+    """('fresh'|'stale'|'miss', data). refresh=True 면 무조건 miss(동기 재계산 강제)."""
+    if refresh:
+        return ("miss", None)
+    entry = cache.get(key)
     if not entry:
-        return None
+        return ("miss", None)
     ts, data = entry
-    if time.time() - ts > BACKTEST_CACHE_TTL_SEC:
-        _cache.pop(key, None)
-        return None
-    return data
+    age = time.time() - ts
+    if age < ttl:
+        return ("fresh", data)
+    if BACKTEST_SWR_ENABLED and age < max_stale:
+        return ("stale", data)
+    return ("miss", None)  # 너무 오래됨 → 동기 재계산
 
 
-def _cache_put(key: str, data: dict[str, Any]) -> None:
-    _cache[key] = (time.time(), data)
+def _spawn_refresh(
+    cache: dict[str, tuple[float, dict[str, Any]]],
+    key: str,
+    compute: Callable[[], Awaitable[dict[str, Any]]],
+    *,
+    persist: bool,
+) -> None:
+    """백그라운드 재계산을 단일비행으로 1건만 띄운다(같은 key 중복 방지)."""
+    with _refresh_guard:
+        if key in _refreshing:
+            return
+        _refreshing.add(key)
+
+    async def _run() -> None:
+        try:
+            data = await compute()
+            cache[key] = (time.time(), data)
+            if persist:
+                _persist_soon()
+        except Exception as e:
+            logger.warning("SWR 백그라운드 갱신 실패 (%s): %s", key, e)
+        finally:
+            with _refresh_guard:
+                _refreshing.discard(key)
+
+    try:
+        asyncio.get_running_loop().create_task(_run())
+    except RuntimeError:
+        # 실행 중 이벤트 루프 없음(동기 테스트 등) — 갱신 스킵, 가드 해제.
+        with _refresh_guard:
+            _refreshing.discard(key)
+
+
+async def _run_cached(
+    cache: dict[str, tuple[float, dict[str, Any]]],
+    key: str,
+    ttl: int,
+    max_stale: int,
+    compute: Callable[[], Awaitable[dict[str, Any]]],
+    *,
+    refresh: bool,
+    persist: bool,
+) -> dict[str, Any]:
+    """SWR 공통 경로: fresh→즉시, stale→즉시+백그라운드 갱신, miss→동기 계산."""
+    _ensure_restored()
+    status, data = _swr_lookup(cache, key, ttl, max_stale, refresh=refresh)
+    if status == "fresh":
+        return data
+    if status == "stale" and data is not None:
+        _spawn_refresh(cache, key, compute, persist=persist)
+        return data
+    # miss — 동기 계산(프로세스 최초 1회 또는 refresh/너무 오래된 캐시)
+    result = await compute()
+    cache[key] = (time.time(), result)
+    if persist:
+        _persist_soon()
+    return result
 
 
 def _sanitize_lookback(days: int | None) -> int:
@@ -1189,19 +1332,19 @@ async def run_signals_backtest(
     *,
     refresh: bool = False,
 ) -> dict[str, Any]:
-    """대시보드 시그널(analysis_results) 백테스트."""
+    """대시보드 시그널(analysis_results) 백테스트. SWR — 진입은 항상 즉시 응답."""
     lb = _sanitize_lookback(lookback_days)
     hs = _normalize_horizons(horizons)
     key = _cache_key("signals", lb, hs)
-    if not refresh:
-        cached = _cache_get(key)
-        if cached is not None:
-            return cached
 
-    result = await asyncio.to_thread(_run_signals_backtest_sync, lb, hs)
-    sanitized = sanitize_for_json(result)
-    _cache_put(key, sanitized)
-    return sanitized
+    async def _compute() -> dict[str, Any]:
+        result = await asyncio.to_thread(_run_signals_backtest_sync, lb, hs)
+        return sanitize_for_json(result)
+
+    return await _run_cached(
+        _cache, key, BACKTEST_CACHE_TTL_SEC, BACKTEST_SWR_MAX_STALE_SEC,
+        _compute, refresh=refresh, persist=True,
+    )
 
 
 async def run_strategist_backtest(
@@ -1210,19 +1353,19 @@ async def run_strategist_backtest(
     *,
     refresh: bool = False,
 ) -> dict[str, Any]:
-    """AI 전략실 추천(strategy_history) 백테스트."""
+    """AI 전략실 추천(strategy_history) 백테스트. SWR — 진입은 항상 즉시 응답."""
     lb = _sanitize_lookback(lookback_days)
     hs = _normalize_horizons(horizons)
     key = _cache_key("strategist", lb, hs)
-    if not refresh:
-        cached = _cache_get(key)
-        if cached is not None:
-            return cached
 
-    result = await asyncio.to_thread(_run_strategist_backtest_sync, lb, hs)
-    sanitized = sanitize_for_json(result)
-    _cache_put(key, sanitized)
-    return sanitized
+    async def _compute() -> dict[str, Any]:
+        result = await asyncio.to_thread(_run_strategist_backtest_sync, lb, hs)
+        return sanitize_for_json(result)
+
+    return await _run_cached(
+        _cache, key, BACKTEST_CACHE_TTL_SEC, BACKTEST_SWR_MAX_STALE_SEC,
+        _compute, refresh=refresh, persist=True,
+    )
 
 
 def _pick_headline(result: dict[str, Any], horizon: int) -> dict[str, Any]:
@@ -1527,23 +1670,10 @@ def _run_live_sync(lookback_days: int, horizons: list[int]) -> dict[str, Any]:
     }
 
 
-# 라이브 뷰는 별도 캐시(짧은 TTL) 사용
+# 라이브 뷰는 별도 캐시(짧은 TTL) 사용 — 진입 즉시 응답은 SWR 로, 단 stale 허용은
+# BACKTEST_LIVE_SWR_MAX_STALE_SEC(기본 10분)로 짧게(진행 중 포지션은 최신성이 중요).
+# 파일 영속화는 안 함 — 재시작 전 '진행 중' 스냅샷은 의미가 옅고 워밍이 곧 채운다.
 _live_cache: dict[str, tuple[float, dict[str, Any]]] = {}
-
-
-def _live_cache_get(key: str) -> dict[str, Any] | None:
-    entry = _live_cache.get(key)
-    if not entry:
-        return None
-    ts, data = entry
-    if time.time() - ts > BACKTEST_LIVE_CACHE_TTL_SEC:
-        _live_cache.pop(key, None)
-        return None
-    return data
-
-
-def _live_cache_put(key: str, data: dict[str, Any]) -> None:
-    _live_cache[key] = (time.time(), data)
 
 
 async def run_live_positions(
@@ -1556,23 +1686,23 @@ async def run_live_positions(
     현재 진행 중(open) 포지션 — horizon 미달 레코드의 현재가 mark-to-market.
 
     signals(대시보드) + strategist(AI 전략실) 두 소스를 한 번에 반환한다.
-    캐시 TTL은 BACKTEST_LIVE_CACHE_TTL_SEC(기본 1분).
+    SWR — 신선 캐시(BACKTEST_LIVE_CACHE_TTL_SEC) 이내면 즉시, 그 이상~MAX_STALE 이내면
+    직전 결과 즉시 + 백그라운드 갱신, 그 이상이면 동기 계산.
     """
     hs = _normalize_horizons(horizons)
     # 기본 lookback: 최대 horizon * 2 (오래된 건 어차피 elapsed >= h 로 자동 제외)
     default_lb = max(hs) * 2 if hs else BACKTEST_DEFAULT_LOOKBACK_DAYS
     lb = _sanitize_lookback(lookback_days or default_lb)
-
     key = _cache_key("live", lb, hs)
-    if not refresh:
-        cached = _live_cache_get(key)
-        if cached is not None:
-            return cached
 
-    result = await asyncio.to_thread(_run_live_sync, lb, hs)
-    sanitized = sanitize_for_json(result)
-    _live_cache_put(key, sanitized)
-    return sanitized
+    async def _compute() -> dict[str, Any]:
+        result = await asyncio.to_thread(_run_live_sync, lb, hs)
+        return sanitize_for_json(result)
+
+    return await _run_cached(
+        _live_cache, key, BACKTEST_LIVE_CACHE_TTL_SEC, BACKTEST_LIVE_SWR_MAX_STALE_SEC,
+        _compute, refresh=refresh, persist=False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1953,14 +2083,14 @@ async def run_trade_history(
     cache_key = hashlib.sha1(
         f"trades|{src}|{h}|{lb}|{int(include_open)}|{gb}".encode("utf-8")
     ).hexdigest()
-    if not refresh:
-        cached = _cache_get(cache_key)
-        if cached is not None:
-            return cached
 
-    result = await asyncio.to_thread(
-        _run_trade_history_sync, src, h, lb, include_open=include_open, group_by=gb,
+    async def _compute() -> dict[str, Any]:
+        result = await asyncio.to_thread(
+            _run_trade_history_sync, src, h, lb, include_open=include_open, group_by=gb,
+        )
+        return sanitize_for_json(result)
+
+    return await _run_cached(
+        _cache, cache_key, BACKTEST_CACHE_TTL_SEC, BACKTEST_SWR_MAX_STALE_SEC,
+        _compute, refresh=refresh, persist=True,
     )
-    sanitized = sanitize_for_json(result)
-    _cache_put(cache_key, sanitized)
-    return sanitized
