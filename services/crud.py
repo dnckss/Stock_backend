@@ -862,6 +862,57 @@ def save_heatmap_snapshot(data: dict) -> None:
         logger.warning("히트맵 DB 저장 실패: %s", e)
 
 
+def save_backtest_cache(cache_key: str, payload: dict, updated_at_iso: str | None = None) -> None:
+    """backtest_cache 테이블에 결과 1건을 cache_key 기준 upsert 한다(영속 캐시).
+
+    payload 는 이미 sanitize 된 결과 dict. 실패해도 best-effort(메모리 캐시로 동작).
+    """
+    if not cache_key:
+        return
+    client = _get_client()
+    row = {
+        "cache_key": cache_key,
+        "payload_json": json.dumps(sanitize_for_json(payload), ensure_ascii=False),
+        "updated_at": updated_at_iso or datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        client.table("backtest_cache").upsert(row, on_conflict="cache_key").execute()
+    except Exception as e:
+        logger.warning("백테스트 캐시 DB 저장 실패 (%s): %s", cache_key, e)
+
+
+def get_all_backtest_cache() -> list[dict]:
+    """backtest_cache 전체 행을 읽어 [{cache_key, payload(dict), updated_at}] 로 반환.
+
+    재시작 후 인메모리 SWR 캐시 복원용. 실패 시 빈 리스트(동기 재계산으로 폴백).
+    """
+    client = _get_client()
+    try:
+        resp = client.table("backtest_cache").select("cache_key, payload_json, updated_at").execute()
+    except Exception as e:
+        logger.warning("백테스트 캐시 DB 조회 실패: %s", e)
+        return []
+    out: list[dict] = []
+    for row in resp.data or []:
+        raw = row.get("payload_json")
+        payload = None
+        if isinstance(raw, str):
+            try:
+                payload = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                payload = None
+        elif isinstance(raw, dict):
+            payload = raw
+        if payload is None:
+            continue
+        out.append({
+            "cache_key": row.get("cache_key"),
+            "payload": payload,
+            "updated_at": row.get("updated_at"),
+        })
+    return out
+
+
 def get_heatmap_snapshot() -> dict | None:
     """sp500_heatmap 테이블에서 최신 스냅샷을 읽는다. 없으면 None."""
     client = _get_client()

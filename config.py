@@ -442,7 +442,9 @@ YF_RATE_LIMIT_RETRIES = int(os.getenv("YF_RATE_LIMIT_RETRIES", "3"))
 YF_RATE_LIMIT_BACKOFF_SEC = float(os.getenv("YF_RATE_LIMIT_BACKOFF_SEC", "2.0"))
 
 # S&P 500 Heatmap
-HEATMAP_CACHE_TTL_SEC = int(os.getenv("HEATMAP_CACHE_TTL_SEC", "60"))         # 가격 캐시 1분
+# 히트맵 새로고침 주기 — SWR 메모리 캐시가 이 시간보다 오래되면 다음 요청에서
+# 직전 스냅샷을 즉시 반환하고 백그라운드로 갱신한다(= 실질 데이터 갱신 주기).
+HEATMAP_CACHE_TTL_SEC = int(os.getenv("HEATMAP_CACHE_TTL_SEC", "300"))        # 가격 캐시 5분
 HEATMAP_MCAP_CACHE_TTL_SEC = int(os.getenv("HEATMAP_MCAP_CACHE_TTL_SEC", "1800"))  # 시가총액 캐시 30분
 # 시가총액 동시 조회 수 — 30 은 yfinance 폭주 → 차단을 유발해 8 로 보수화
 HEATMAP_MCAP_CONCURRENCY = int(os.getenv("HEATMAP_MCAP_CONCURRENCY", "8"))
@@ -611,11 +613,9 @@ BACKTEST_SWR_ENABLED = _bool_env("BACKTEST_SWR_ENABLED", "true")
 BACKTEST_SWR_MAX_STALE_SEC = int(os.getenv("BACKTEST_SWR_MAX_STALE_SEC", "86400"))  # 1일
 # 라이브(진행 중 포지션)는 현재가 mark-to-market 이라 stale 허용을 짧게 — 그 이상이면 동기 계산.
 BACKTEST_LIVE_SWR_MAX_STALE_SEC = int(os.getenv("BACKTEST_LIVE_SWR_MAX_STALE_SEC", "600"))  # 10분
-# 결과 캐시 로컬 파일 영속화 — 프로세스 재시작 후 첫 진입도 스냅샷으로 즉답(+백그라운드 갱신).
+# 결과 캐시 DB 영속화(Supabase backtest_cache 테이블) — 프로세스 재시작 후 첫 진입도
+# 직전 스냅샷으로 즉답(+백그라운드 갱신). 키별 upsert + 기동 시 전체 복원.
 BACKTEST_PERSIST_ENABLED = _bool_env("BACKTEST_PERSIST_ENABLED", "true")
-BACKTEST_PERSIST_PATH = os.getenv("BACKTEST_PERSIST_PATH", ".backtest_cache.json")
-# 파일 쓰기 디바운스(초) — 잦은 put/refresh 에도 디스크 쓰기는 이 간격 이상으로 제한.
-BACKTEST_PERSIST_DEBOUNCE_SEC = int(os.getenv("BACKTEST_PERSIST_DEBOUNCE_SEC", "5"))
 
 # ---------------------------------------------------------------------------
 # AI Chat (종목 질의 챗봇, SSE 스트리밍)

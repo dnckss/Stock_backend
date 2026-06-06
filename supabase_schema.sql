@@ -213,3 +213,18 @@ CREATE INDEX IF NOT EXISTS idx_price_history_ticker ON price_history (ticker);
 
 ALTER TABLE price_history ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Allow all for anon" ON price_history FOR ALL USING (true) WITH CHECK (true);
+
+-- ---------------------------------------------------------------------------
+-- 10. backtest_cache 테이블 (백테스트 결과 영속 캐시)
+-- SWR 결과(signals/strategist/trades)를 cache_key 별로 저장해, 프로세스 재시작
+-- 후에도 첫 진입을 즉시 서빙(직전 스냅샷 + 백그라운드 갱신)할 수 있게 한다.
+-- payload_json 은 sanitize 된 결과 dict 를 json.dumps 한 문자열.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS backtest_cache (
+    cache_key TEXT PRIMARY KEY,
+    payload_json TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE backtest_cache ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow all for anon" ON backtest_cache FOR ALL USING (true) WITH CHECK (true);

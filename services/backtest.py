@@ -22,10 +22,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 import math
-import os
 import statistics
 import threading
 import time
@@ -42,9 +40,7 @@ from config import (
     BACKTEST_CAGR_MIN_SPAN_DAYS,
     BACKTEST_COST_BPS,
     BACKTEST_LIVE_SWR_MAX_STALE_SEC,
-    BACKTEST_PERSIST_DEBOUNCE_SEC,
     BACKTEST_PERSIST_ENABLED,
-    BACKTEST_PERSIST_PATH,
     BACKTEST_SWR_ENABLED,
     BACKTEST_SWR_MAX_STALE_SEC,
     BACKTEST_DEFAULT_HORIZONS,
@@ -1162,17 +1158,16 @@ def _empty_horizon_block(h: int) -> dict[str, Any]:
 # 캐시 + Public API
 # ---------------------------------------------------------------------------
 
-# 완료 백테스트(signals/strategist/trades) 결과 캐시. 파일 영속화 대상.
+# 완료 백테스트(signals/strategist/trades) 결과 캐시. DB(backtest_cache) 영속화 대상.
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 # SWR 백그라운드 갱신 단일비행 가드 — 같은 key 의 중복 재계산 방지.
 _refreshing: set[str] = set()
 _refresh_guard = threading.Lock()
 
-# 파일 영속화 상태 — 디바운스 타임스탬프 + 1회 복원 플래그(모두 lock 하에).
-_persist_lock = threading.Lock()
-_last_persist_ts: float = 0.0
-_restored = False
+# DB 복원 단일화 — 첫 접근 시 1회만 복원 태스크를 만들고 모든 호출이 그것을 await.
+_restore_task: asyncio.Task | None = None
+_restore_lock = threading.Lock()
 
 
 def _cache_key(kind: str, lookback_days: int, horizons: list[int]) -> str:
@@ -1181,57 +1176,63 @@ def _cache_key(kind: str, lookback_days: int, horizons: list[int]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 파일 영속화 — 재시작 후 첫 진입도 스냅샷으로 즉답(stale) 후 백그라운드 갱신.
-# 결과는 이미 sanitize_for_json 통과한 JSON 호환 dict 라 그대로 직렬화 가능.
+# DB 영속화 (Supabase backtest_cache) — 재시작 후 첫 진입도 직전 스냅샷으로 즉답(stale)
+# 후 백그라운드 갱신. 결과는 이미 sanitize_for_json 통과한 JSON 호환 dict.
 # ---------------------------------------------------------------------------
 
-def _persist_soon() -> None:
-    """_cache 스냅샷을 디바운스해 로컬 파일로 저장(best-effort)."""
+def _persist_key(key: str, data: dict[str, Any]) -> None:
+    """결과 1건을 backtest_cache 에 fire-and-forget upsert(이벤트 루프 비차단, best-effort)."""
     if not BACKTEST_PERSIST_ENABLED:
         return
-    global _last_persist_ts
-    with _persist_lock:
-        now = time.time()
-        if now - _last_persist_ts < max(0, BACKTEST_PERSIST_DEBOUNCE_SEC):
-            return
-        _last_persist_ts = now
-        snapshot = {k: {"ts": ts, "data": d} for k, (ts, d) in _cache.items()}
-    try:
-        tmp = f"{BACKTEST_PERSIST_PATH}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(snapshot, f, ensure_ascii=False)
-        os.replace(tmp, BACKTEST_PERSIST_PATH)  # 원자적 교체 — 부분쓰기로 깨진 파일 방지
-    except Exception as e:
-        logger.warning("백테스트 캐시 영속화 실패: %s", e)
 
-
-def _ensure_restored() -> None:
-    """프로세스 첫 접근 시 1회 — 파일 스냅샷을 _cache 로 복원(원래 ts 유지 → SWR 가 stale 판정)."""
-    global _restored
-    if _restored:
-        return
-    with _persist_lock:
-        if _restored:
-            return
-        _restored = True
-        if not BACKTEST_PERSIST_ENABLED:
-            return
+    async def _save() -> None:
         try:
-            if not os.path.exists(BACKTEST_PERSIST_PATH):
-                return
-            with open(BACKTEST_PERSIST_PATH, encoding="utf-8") as f:
-                snapshot = json.load(f)
-            restored = 0
-            for k, v in (snapshot or {}).items():
-                try:
-                    _cache[k] = (float(v["ts"]), v["data"])
-                    restored += 1
-                except (KeyError, TypeError, ValueError):
-                    continue
-            if restored:
-                logger.info("백테스트 캐시 복원: %d개 키 (%s)", restored, BACKTEST_PERSIST_PATH)
+            from services.crud import save_backtest_cache
+            await asyncio.to_thread(save_backtest_cache, key, data)
         except Exception as e:
-            logger.warning("백테스트 캐시 복원 실패: %s", e)
+            logger.warning("백테스트 캐시 DB 저장 실패 (%s): %s", key, e)
+
+    try:
+        asyncio.get_running_loop().create_task(_save())
+    except RuntimeError:
+        pass  # 실행 중 이벤트 루프 없음 — 스킵
+
+
+async def _do_restore() -> None:
+    """backtest_cache(DB) 전체를 _cache 로 복원. 복원분은 'stale' ts 로 적재해
+    첫 접근에서 즉시 서빙 + 백그라운드 갱신이 일어나게 한다."""
+    try:
+        from services.crud import get_all_backtest_cache
+        rows = await asyncio.to_thread(get_all_backtest_cache)
+    except Exception as e:
+        logger.warning("백테스트 캐시 DB 복원 실패: %s", e)
+        return
+    stale_ts = time.time() - BACKTEST_CACHE_TTL_SEC - 1  # soft TTL 초과 → serve+refresh
+    restored = 0
+    for row in rows:
+        key = row.get("cache_key")
+        payload = row.get("payload")
+        if not key or payload is None:
+            continue
+        # 복원 도중 라이브로 계산된(더 신선한) 엔트리는 덮어쓰지 않는다.
+        _cache.setdefault(key, (stale_ts, payload))
+        restored += 1
+    if restored:
+        logger.info("백테스트 캐시 DB 복원: %d개 키", restored)
+
+
+async def _ensure_restored() -> None:
+    """프로세스 첫 접근 시 1회만 DB 복원. 동시 첫 호출은 같은 복원 태스크를 await."""
+    global _restore_task
+    if not BACKTEST_PERSIST_ENABLED:
+        return
+    with _restore_lock:
+        if _restore_task is None:
+            _restore_task = asyncio.get_running_loop().create_task(_do_restore())
+    try:
+        await _restore_task
+    except Exception:
+        pass  # 복원 실패는 비치명적 — 동기 계산으로 폴백
 
 
 # ---------------------------------------------------------------------------
@@ -1279,7 +1280,7 @@ def _spawn_refresh(
             data = await compute()
             cache[key] = (time.time(), data)
             if persist:
-                _persist_soon()
+                _persist_key(key, data)
         except Exception as e:
             logger.warning("SWR 백그라운드 갱신 실패 (%s): %s", key, e)
         finally:
@@ -1305,7 +1306,8 @@ async def _run_cached(
     persist: bool,
 ) -> dict[str, Any]:
     """SWR 공통 경로: fresh→즉시, stale→즉시+백그라운드 갱신, miss→동기 계산."""
-    _ensure_restored()
+    if persist:
+        await _ensure_restored()  # 재시작 후 첫 진입 시 DB 스냅샷 복원(1회)
     status, data = _swr_lookup(cache, key, ttl, max_stale, refresh=refresh)
     if status == "fresh":
         return data
@@ -1316,7 +1318,7 @@ async def _run_cached(
     result = await compute()
     cache[key] = (time.time(), result)
     if persist:
-        _persist_soon()
+        _persist_key(key, result)
     return result
 
 
