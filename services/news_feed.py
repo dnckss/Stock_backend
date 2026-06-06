@@ -15,6 +15,7 @@ from services.news_sentiment import (
     normalize_to_polarity,
     polarity_to_ko,
 )
+from services.utils import spawn_logged
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +217,10 @@ async def build_news_feed(tickers: list[str]) -> list[dict[str, Any]]:
     feed = enrich_feed_with_llm(feed)
     _cache = feed
     _cache_at = datetime.now()
+
+    # 본문 전체를 백그라운드로 미리 크롤링해 news_articles DB 에 저장 → 사용자가 뉴스를
+    # 눌렀을 때 on-demand 크롤링 없이 DB 캐시로 즉시 응답. (이미 캐시된 건 건너뜀)
+    spawn_logged(prefetch_news_articles(feed), name="prefetch_news_articles")
     return feed
 
 
@@ -291,6 +296,10 @@ async def build_stock_news_feed(ticker: str, limit: int = 10, refresh: bool = Fa
 
     result = enrich_feed_with_llm(deduped[:safe_limit])
     _stock_news_cache[upper] = (datetime.now(), result)
+
+    # 종목 상세 뉴스도 본문을 미리 크롤링해 DB 에 저장 → 클릭 시 즉시 응답.
+    # (기존엔 종목 뉴스 경로에 본문 프리페치가 없어 클릭마다 on-demand 크롤링 → 느렸다.)
+    spawn_logged(prefetch_news_articles(result), name="prefetch_stock_news_articles")
     return result
 
 

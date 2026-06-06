@@ -376,10 +376,7 @@ async def run_news_feed_loop():
             latest_cache["updated_at"] = datetime.now().isoformat()
             await manager.broadcast({"type": "MARKET_UPDATE", **sanitize_for_json(latest_cache)})
             logger.info("뉴스 피드 갱신 완료: %d건", len(feed))
-
-            # 백그라운드 본문 프리페치 — 사용자 클릭 시 즉시 응답 가능하도록
-            from services.news_feed import prefetch_news_articles
-            spawn_logged(prefetch_news_articles(feed), name="prefetch_news_articles")
+            # 본문 프리페치는 build_news_feed 내부에서 spawn 됨(중복 호출 불필요).
             failures = 0
             await asyncio.sleep(NEWS_FEED_INTERVAL_SEC)
         except asyncio.CancelledError:

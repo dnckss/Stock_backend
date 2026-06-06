@@ -112,13 +112,12 @@ async def _seed_initial_caches():
         logger.warning("기동 시 매크로 수집 실패: %s", e, exc_info=True)
 
     # 뉴스 + FinBERT (가장 무거움 — 모델 첫 로드 시 수백 MB 다운로드)
+    # 본문 프리페치는 build_news_feed 내부에서 spawn 된다(별도 호출 불필요).
     try:
         from config import NEWS_FALLBACK_TICKERS
-        from services.news_feed import prefetch_news_articles
         feed = await build_news_feed(NEWS_FALLBACK_TICKERS)
         latest_cache["news_feed"] = feed
         latest_cache["updated_at"] = datetime.now().isoformat()
-        spawn_logged(prefetch_news_articles(feed), name="prefetch_news_articles")
     except Exception as e:
         logger.warning("기동 시 뉴스 수집 실패: %s", e, exc_info=True)
 
