@@ -90,10 +90,13 @@ async def api_news_top(
 
 
 @router.get("/news")
-async def api_news_detail(url: str, refresh: int = 0, analyze: int = 1):
+async def api_news_detail(url: str, refresh: int = 0, analyze: int = 0):
     """
     뉴스 상세(원문 URL 크롤링):
     - url: 원문 URL (yfinance news의 url을 그대로 전달)
+    - analyze: 기본 0. 본문·FinBERT 만 즉시 반환(본문은 프리페치 캐시로 빠름).
+      LLM 한국어 분석은 비용·지연(최대 NEWS_ANALYSIS_TIMEOUT_SEC)이 커서
+      analyze=1 로 명시 요청할 때만 동기 수행한다.
     """
     if not url or not url.strip():
         raise HTTPException(status_code=400, detail="url 쿼리 파라미터가 필요합니다.")
