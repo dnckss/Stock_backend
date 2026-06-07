@@ -1,10 +1,18 @@
 import asyncio
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 
+from config import (
+    NEWS_IMPACT_HALF_LIFE_HOURS,
+    NEWS_TOP_DEFAULT_LIMIT,
+    NEWS_TOP_DEFAULT_WINDOW_HOURS,
+    NEWS_TOP_MAX_WINDOW_HOURS,
+    NEWS_TOP_SCAN_MAX_ITEMS,
+)
 from services.crud import count_news_items, get_news_items, sanitize_for_json
 from services.news_article import get_news_article
-from services.news_feed import enrich_feed_with_llm
+from services.news_feed import attach_impact_scores, enrich_feed_with_llm
 from services.economic_calendar import fetch_economic_calendar
 from services.econ_detail import get_econ_event_detail
 
@@ -32,6 +40,8 @@ async def api_news_list(
         get_news_items, limit=safe_limit, ticker=ticker, offset=safe_offset,
     )
     items = enrich_feed_with_llm(items)
+    # score(경로 통일) + impact(0~1) 부여 — 라이브 종목 피드와 필드 일치.
+    items = attach_impact_scores(items)
     payload: dict = {
         "items": items,
         "count": len(items),
@@ -41,6 +51,42 @@ async def api_news_list(
     if with_count:
         payload["total"] = await asyncio.to_thread(count_news_items, ticker=ticker)
     return sanitize_for_json(payload)
+
+
+@router.get("/news/top")
+async def api_news_top(
+    limit: int = NEWS_TOP_DEFAULT_LIMIT,
+    window_hours: int = NEWS_TOP_DEFAULT_WINDOW_HOURS,
+    ticker: str | None = None,
+    half_life_hours: float = NEWS_IMPACT_HALF_LIFE_HOURS,
+):
+    """
+    최근 구간 뉴스 중 시장 영향도 상위 항목을 반환한다(전체 코퍼스 기준 랭킹).
+    - limit: 상위 개수 (기본 NEWS_TOP_DEFAULT_LIMIT, 최대 50)
+    - window_hours: 랭킹 대상 최근 구간 (기본 NEWS_TOP_DEFAULT_WINDOW_HOURS, 최대 NEWS_TOP_MAX_WINDOW_HOURS)
+    - ticker: 특정 종목 필터 (선택)
+    - half_life_hours: 시간 감쇠 반감기 (기본 NEWS_IMPACT_HALF_LIFE_HOURS)
+    응답 items 는 /api/news/list 와 동일 형식 + impact 필드를 포함하며 impact 내림차순 정렬.
+    """
+    safe_limit = max(1, min(limit, 50))
+    safe_window = max(1, min(window_hours, NEWS_TOP_MAX_WINDOW_HOURS))
+    safe_half_life = half_life_hours if half_life_hours and half_life_hours > 0 else NEWS_IMPACT_HALF_LIFE_HOURS
+    since_ts = int(datetime.now(timezone.utc).timestamp() - safe_window * 3600)
+
+    items = await asyncio.to_thread(
+        get_news_items, limit=NEWS_TOP_SCAN_MAX_ITEMS, ticker=ticker, since_ts=since_ts,
+    )
+    items = enrich_feed_with_llm(items)
+    items = attach_impact_scores(items, half_life_hours=safe_half_life)
+    items.sort(key=lambda x: x.get("impact", 0.0), reverse=True)
+    top = items[:safe_limit]
+    return sanitize_for_json({
+        "items": top,
+        "count": len(top),
+        "limit": safe_limit,
+        "window_hours": safe_window,
+        "half_life_hours": safe_half_life,
+    })
 
 
 @router.get("/news")

@@ -3,12 +3,17 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import yfinance as yf
 
-from config import NEWS_FEED_MAX_ITEMS, NEWS_FEED_TTL_SEC, NEWS_CRAWL_MAX_CONCURRENT
+from config import (
+    NEWS_FEED_MAX_ITEMS,
+    NEWS_FEED_TTL_SEC,
+    NEWS_CRAWL_MAX_CONCURRENT,
+    NEWS_IMPACT_HALF_LIFE_HOURS,
+)
 from services.finbert import analyze_batch
 from services.news_sentiment import (
     llm_polarity_from_analysis,
@@ -58,6 +63,59 @@ def enrich_feed_with_llm(feed: list[dict[str, Any]]) -> list[dict[str, Any]]:
         item["sentiment_ko"] = polarity_to_ko(llm_polarity)
         item["sentiment_label"] = llm_polarity
         item["sentiment_source"] = "llm"
+    return feed
+
+
+def _coerce_score(item: dict[str, Any]) -> float:
+    """라이브 경로(score)와 DB 목록 경로(sentiment_score) 의 감성 점수 필드를 통일한다.
+
+    라이브 종목 상세 피드는 FinBERT 가 item["score"] 를 부여하지만,
+    DB(news_items) 경로는 컬럼명이 sentiment_score 라 score 가 비어 있어
+    프런트 영향도 계산이 0 이 되던 불일치를 흡수한다.
+    """
+    raw = item.get("score")
+    if raw is None:
+        raw = item.get("sentiment_score")
+    try:
+        return float(raw) if raw is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def attach_impact_scores(
+    feed: list[dict[str, Any]],
+    *,
+    half_life_hours: float = NEWS_IMPACT_HALF_LIFE_HOURS,
+) -> list[dict[str, Any]]:
+    """피드 항목에 score(경로 통일) + impact(0.0~1.0) 를 부여한다(단일 출처).
+
+    impact = clamp01( |score| × confidence × 0.5^(age_hours / half_life_hours) )
+      - age_hours = (now − timestamp) / 3600, timestamp 는 epoch seconds.
+      - half_life_hours 이하/0/음수는 기본값으로 폴백한다.
+    """
+    if not feed:
+        return feed
+    hl = half_life_hours if half_life_hours and half_life_hours > 0 else NEWS_IMPACT_HALF_LIFE_HOURS
+    now_ts = datetime.now(timezone.utc).timestamp()
+    for item in feed:
+        score = _coerce_score(item)
+        item["score"] = score
+
+        conf_raw = item.get("confidence")
+        try:
+            confidence = float(conf_raw) if conf_raw is not None else 0.0
+        except (TypeError, ValueError):
+            confidence = 0.0
+
+        impact = abs(score) * confidence
+        ts = item.get("timestamp") or 0
+        if impact > 0 and ts:
+            try:
+                age_hours = max(0.0, (now_ts - float(ts)) / 3600.0)
+                impact *= 0.5 ** (age_hours / hl)
+            except (TypeError, ValueError):
+                pass
+        item["impact"] = max(0.0, min(1.0, impact))
     return feed
 
 

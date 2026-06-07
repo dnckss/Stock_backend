@@ -725,14 +725,21 @@ def get_news_items(
     limit: int = 50,
     ticker: str | None = None,
     offset: int = 0,
+    since_ts: int | None = None,
 ) -> list[dict]:
-    """뉴스 피드 항목을 최신순(timestamp DESC)으로 조회. offset 으로 페이지네이션."""
+    """뉴스 피드 항목을 최신순(timestamp DESC)으로 조회. offset 으로 페이지네이션.
+
+    since_ts(epoch seconds) 지정 시 timestamp >= since_ts 인 최근 구간만 조회한다
+    (영향도 TOP 랭킹 후보 수집용).
+    """
     client = _get_client()
     safe_offset = max(0, offset)
     safe_limit = max(1, limit)
     query = client.table("news_items").select("*").order("timestamp", desc=True)
     if ticker:
         query = query.eq("ticker", ticker.upper())
+    if since_ts is not None:
+        query = query.gte("timestamp", int(since_ts))
     resp = query.range(safe_offset, safe_offset + safe_limit - 1).execute()
     return _sanitize(resp.data)
 

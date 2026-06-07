@@ -289,6 +289,13 @@ NEWS_FEED_MAX_ITEMS = 30
 NEWS_FEED_TTL_SEC = 300
 NEWS_FEED_INTERVAL_SEC = int(os.getenv("NEWS_FEED_INTERVAL_SEC", "600"))  # 10분 주기
 
+# News impact 랭킹 — 시장 영향도 = clamp01(|score| × confidence × 0.5^(age_hours/half_life))
+NEWS_IMPACT_HALF_LIFE_HOURS = float(os.getenv("NEWS_IMPACT_HALF_LIFE_HOURS", "24"))  # 시간 감쇠 반감기
+NEWS_TOP_DEFAULT_LIMIT = int(os.getenv("NEWS_TOP_DEFAULT_LIMIT", "5"))               # /api/news/top 기본 상위 개수
+NEWS_TOP_DEFAULT_WINDOW_HOURS = int(os.getenv("NEWS_TOP_DEFAULT_WINDOW_HOURS", "72"))  # 랭킹 대상 최근 구간
+NEWS_TOP_MAX_WINDOW_HOURS = int(os.getenv("NEWS_TOP_MAX_WINDOW_HOURS", "720"))       # window_hours 상한 (30일)
+NEWS_TOP_SCAN_MAX_ITEMS = int(os.getenv("NEWS_TOP_SCAN_MAX_ITEMS", "500"))           # 랭킹 산출용 후보 최대 조회 수
+
 # Economic Calendar (myfxbook 크롤링)
 ECON_CALENDAR_TTL_SEC = int(os.getenv("ECON_CALENDAR_TTL_SEC", "600"))  # 10분
 ECON_CALENDAR_INTERVAL_SEC = int(os.getenv("ECON_CALENDAR_INTERVAL_SEC", "600"))  # 10분 주기 크롤링
