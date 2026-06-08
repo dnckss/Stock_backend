@@ -920,6 +920,59 @@ def get_all_backtest_cache() -> list[dict]:
     return out
 
 
+def save_macro_value_cache(cache: dict) -> None:
+    """매크로 지표 per-ticker 마지막 정상값을 DB에 영속화한다(단일 행).
+
+    야후(yfinance) 일시 차단·서버 재시작 시에도 직전 정상값을 stale 폴백으로 복원해,
+    매크로/VIX/게이지가 빈칸(null)으로 떨어지지 않게 한다. heatmap 스냅샷과 동일 패턴.
+
+    Supabase 테이블 생성 SQL:
+      CREATE TABLE macro_cache (
+          id INTEGER PRIMARY KEY DEFAULT 1,
+          data_json TEXT NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    """
+    if not cache:
+        return
+    client = _get_client()
+    row = {
+        "id": 1,
+        "data_json": json.dumps(sanitize_for_json(cache), ensure_ascii=False),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        client.table("macro_cache").upsert(row, on_conflict="id").execute()
+    except Exception as e:
+        logger.warning("매크로 캐시 DB 저장 실패: %s", e)
+
+
+def get_macro_value_cache() -> dict:
+    """macro_cache 단일 행에서 per-ticker 마지막 정상값을 읽는다. 없으면 빈 dict."""
+    client = _get_client()
+    try:
+        resp = (
+            client.table("macro_cache")
+            .select("data_json")
+            .eq("id", 1)
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:
+        logger.warning("매크로 캐시 DB 조회 실패: %s", e)
+        return {}
+    if not resp.data:
+        return {}
+    raw = resp.data[0].get("data_json")
+    if isinstance(raw, str):
+        try:
+            d = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return d if isinstance(d, dict) else {}
+    return raw if isinstance(raw, dict) else {}
+
+
 def get_heatmap_snapshot() -> dict | None:
     """sp500_heatmap 테이블에서 최신 스냅샷을 읽는다. 없으면 None."""
     client = _get_client()

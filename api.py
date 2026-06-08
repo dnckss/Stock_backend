@@ -107,6 +107,16 @@ async def _seed_initial_caches():
         logger.warning("기동 시 DB 캐시 로드 실패: %s", e, exc_info=True)
 
     # 매크로 (yfinance 동기 호출)
+    # 먼저 DB 에 저장된 per-ticker 마지막 정상값을 메모리 캐시로 복원한다 — 야후가
+    # 차단 중이거나 재시작 직후여도 fetch_macro_indicators 가 stale 폴백으로 값을
+    # 채워, 매크로/VIX/게이지가 빈칸(null)으로 떨어지지 않게 한다.
+    try:
+        from services.scanner import load_macro_value_cache_from_db
+        restored = await asyncio.to_thread(load_macro_value_cache_from_db)
+        if restored:
+            logger.info("매크로 직전 정상값 %d개 DB 복원 완료", restored)
+    except Exception as e:
+        logger.warning("기동 시 매크로 캐시 복원 실패: %s", e)
     try:
         macro = await asyncio.to_thread(fetch_macro_indicators)
         latest_cache["macro"] = macro
