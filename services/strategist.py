@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import yfinance as yf
-from services.utils import make_openai_client
+from services.utils import make_openai_client, spawn_logged
 
 from config import (
     KST,
@@ -165,6 +165,9 @@ _REQUIRED_KEYS = frozenset({"market_summary", "top_sector", "recommendations"})
 _strategy_cache: dict[str, Any] | None = None
 _strategy_cache_at: datetime | None = None
 _strategy_lock = asyncio.Lock()
+# SWR(stale-while-revalidate) 백그라운드 갱신이 동시에 여러 개 떠 OpenAI 가
+# 중복 호출되는 것을 막는 in-flight 가드.
+_strategy_refresh_inflight = False
 
 _sector_cache: dict[str, str] = {}
 
@@ -1121,28 +1124,78 @@ async def build_market_strategy(
     return response
 
 
-async def get_cached_market_strategy(
+async def refresh_market_strategy_cache(
     macro: dict[str, Any] | None,
     market_gauge: int | None,
     vix: float | None,
     news_feed: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """전략 브리핑을 새로 빌드해 캐시에 저장한다(락으로 중복 빌드 방지).
+
+    1시간 주기 워밍 루프(run_strategy_warmup_loop)와 SWR 백그라운드 갱신이 공유.
+    빌드 실패 시 기존 캐시를 유지하고, 캐시조차 없으면 _fatal_response 를 캐싱한다.
+    """
     global _strategy_cache, _strategy_cache_at
 
-    if _is_cache_fresh(_strategy_cache_at) and _strategy_cache is not None:
-        return _strategy_cache
-
     async with _strategy_lock:
+        # 락 대기 중 다른 경로가 이미 갱신했으면 그 결과를 재사용(중복 OpenAI 호출 방지).
         if _is_cache_fresh(_strategy_cache_at) and _strategy_cache is not None:
             return _strategy_cache
-
         try:
             result = await build_market_strategy(macro, market_gauge, vix, news_feed)
         except Exception as e:
             if _strategy_cache is not None:
+                logger.warning("전략 캐시 갱신 실패 — 기존 캐시 유지: %s", e)
                 return _strategy_cache
             result = _fatal_response(e)
 
         _strategy_cache = result
         _strategy_cache_at = datetime.now()
         return _strategy_cache
+
+
+def _spawn_strategy_refresh(
+    macro: dict[str, Any] | None,
+    market_gauge: int | None,
+    vix: float | None,
+    news_feed: list[dict[str, Any]] | None,
+) -> None:
+    """캐시가 stale 일 때 백그라운드로 1건만 갱신을 띄운다(in-flight 가드)."""
+    global _strategy_refresh_inflight
+    if _strategy_refresh_inflight:
+        return
+    _strategy_refresh_inflight = True
+
+    async def _run() -> None:
+        global _strategy_refresh_inflight
+        try:
+            await refresh_market_strategy_cache(macro, market_gauge, vix, news_feed)
+        finally:
+            _strategy_refresh_inflight = False
+
+    spawn_logged(_run(), name="strategy_swr_refresh")
+
+
+async def get_cached_market_strategy(
+    macro: dict[str, Any] | None,
+    market_gauge: int | None,
+    vix: float | None,
+    news_feed: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """전략 브리핑을 stale-while-revalidate 로 반환한다.
+
+    - fresh 캐시: 즉시 반환.
+    - stale 캐시: 즉시 반환 + 백그라운드 갱신(사용자는 절대 무거운 빌드를 기다리지 않음).
+    - 캐시 없음(cold start): 워밍 전 첫 진입에 한해 동기 빌드.
+    평상시엔 run_strategy_warmup_loop 가 1시간 주기로 미리 채워 항상 캐시 hit 이다.
+    """
+    if _is_cache_fresh(_strategy_cache_at) and _strategy_cache is not None:
+        return _strategy_cache
+
+    # stale 이지만 직전 결과가 있으면 즉시 주고 백그라운드로만 갱신(SWR).
+    if _strategy_cache is not None:
+        _spawn_strategy_refresh(macro, market_gauge, vix, news_feed)
+        return _strategy_cache
+
+    # cold start — 캐시가 전혀 없을 때만 동기 빌드.
+    return await refresh_market_strategy_cache(macro, market_gauge, vix, news_feed)

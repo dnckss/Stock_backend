@@ -201,10 +201,17 @@ FUNDAMENTALS_VALID_SECTIONS = frozenset({
 # Strategist (Market Strategy)
 # - 최신 스캔 사이클 데이터 추출 창(window) 크기
 STRATEGIST_LATEST_SCAN_WINDOW_MINUTES = 90
-# - 전략 브리핑 OpenAI 응답 캐시 TTL (5분)
-# 응답이 길어질 수 있어 캐시 stampede 방지를 위해 TTL 을 길게 잡는다(30분).
-# 응답이 timeout 에 가까운 시간이 걸려도 다음 호출은 캐시 히트로 즉시 응답.
-STRATEGIST_CACHE_TTL_SEC = int(os.getenv("STRATEGIST_CACHE_TTL_SEC", "1800"))
+# - 전략 브리핑 OpenAI 응답 캐시 TTL.
+# 1시간 주기 자동 워밍(run_strategy_warmup_loop)이 캐시를 미리 채우므로,
+# TTL 을 워밍 주기(1시간)보다 넉넉히(90분) 잡아 사용자가 직접 OpenAI 빌드를
+# 트리거하지 않게 한다(항상 캐시 hit → 즉시 응답, 비용은 시간당 1회로 고정).
+STRATEGIST_CACHE_TTL_SEC = int(os.getenv("STRATEGIST_CACHE_TTL_SEC", "5400"))
+
+# - AI 전략실 자동 워밍: 1시간 주기로 전략 브리핑을 미리 산출해 캐시를 채운다.
+#   사용자 진입 시 무거운 OpenAI 호출 없이 캐시 hit 으로 즉시 응답(stale-while-revalidate).
+STRATEGIST_AUTO_WARMUP_ENABLED = _bool_env("STRATEGIST_AUTO_WARMUP_ENABLED", "true")
+STRATEGIST_AUTO_WARMUP_INTERVAL_SEC = int(os.getenv("STRATEGIST_AUTO_WARMUP_INTERVAL_SEC", "3600"))  # 1시간
+STRATEGIST_AUTO_WARMUP_INITIAL_DELAY_SEC = int(os.getenv("STRATEGIST_AUTO_WARMUP_INITIAL_DELAY_SEC", "20"))
 # - yfinance Ticker.info(섹터) 호출은 타임아웃 위험이 있어
 #   요청당 최대 호출 개수로 제한하고, 결과는 프로세스 내 캐싱한다.
 STRATEGIST_MAX_YFINANCE_SECTOR_CALLS_PER_REQUEST = 20

@@ -68,6 +68,7 @@ from services.engine import (
     run_news_feed_loop,
     run_price_backfill_loop,
     run_price_tick_loop,
+    run_strategy_warmup_loop,
 )
 from services.websocket import manager, latest_cache
 from services.utils import spawn_logged
@@ -183,6 +184,7 @@ async def lifespan(app: FastAPI):
     news_task = asyncio.create_task(run_news_feed_loop())
     backtest_warmup_task = asyncio.create_task(run_backtest_warmup_loop())
     price_backfill_task = asyncio.create_task(run_price_backfill_loop())
+    strategy_warmup_task = asyncio.create_task(run_strategy_warmup_loop())
     logger.info("lifespan yield — uvicorn 이 PORT listen 시작")
     yield
     logger.info("lifespan shutdown — task 정리")
@@ -195,6 +197,7 @@ async def lifespan(app: FastAPI):
     news_task.cancel()
     backtest_warmup_task.cancel()
     price_backfill_task.cancel()
+    strategy_warmup_task.cancel()
 
 
 

@@ -387,6 +387,50 @@ async def run_news_feed_loop():
             await asyncio.sleep(_backoff_delay(failures))
 
 
+async def run_strategy_warmup_loop():
+    """
+    1시간 주기로 AI 전략 브리핑을 미리 산출해 캐시를 워밍한다.
+    사용자가 전략 페이지에 들어오면 무거운 OpenAI 빌드 없이 캐시 hit 으로 즉시 응답된다
+    (stale-while-revalidate). latest_cache 의 macro/gauge/vix/news_feed 를 입력으로 사용.
+    """
+    from config import (
+        STRATEGIST_AUTO_WARMUP_ENABLED,
+        STRATEGIST_AUTO_WARMUP_INITIAL_DELAY_SEC,
+        STRATEGIST_AUTO_WARMUP_INTERVAL_SEC,
+    )
+
+    if not STRATEGIST_AUTO_WARMUP_ENABLED:
+        logger.info("AI 전략 자동 워밍 비활성화 — 건너뜀")
+        return
+
+    # 서버 기동 직후 매크로/스캔 시드와 충돌 회피 — 약간의 초기 지연 후 시작.
+    await asyncio.sleep(max(0, STRATEGIST_AUTO_WARMUP_INITIAL_DELAY_SEC))
+
+    from services.strategist import refresh_market_strategy_cache
+
+    failures = 0
+    while True:
+        try:
+            start = datetime.now()
+            macro = latest_cache.get("macro")
+            market_gauge = latest_cache.get("market_gauge")
+            vix = latest_cache.get("vix")
+            news_feed = latest_cache.get("news_feed")
+            await refresh_market_strategy_cache(macro, market_gauge, vix, news_feed)
+            logger.info(
+                "AI 전략 자동 워밍 완료 (%.1fs)",
+                (datetime.now() - start).total_seconds(),
+            )
+            failures = 0
+            await asyncio.sleep(STRATEGIST_AUTO_WARMUP_INTERVAL_SEC)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            failures += 1
+            _log_loop_failure("전략 워밍", failures, e)
+            await asyncio.sleep(_backoff_delay(failures))
+
+
 async def run_price_backfill_loop():
     """
     매일 1회(기본 6시간 주기) active ticker 의 최근 OHLCV 를 yfinance 로 받아
