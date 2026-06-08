@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import yfinance as yf
+from openai import BadRequestError
 from services.utils import make_openai_client, spawn_logged
 
 from config import (
@@ -55,6 +56,29 @@ def _is_reasoning_model(model: str | None) -> bool:
     """reasoning_effort 를 지원하는 모델 식별 (gpt-5 / o1 / o3 계열)."""
     name = (model or "").lower()
     return "gpt-5" in name or "o1" in name or "o3" in name
+
+
+def _completion_param_variants() -> list[tuple[str, dict[str, Any]]]:
+    """OpenAI chat.completions 호출 파라미터 조합을 우선순위대로 반환한다.
+
+    뉴스 분석 경로(news_analysis._run_completion_strategies)와 동일한 견고성:
+    특정 파라미터가 400(BadRequestError)을 내면 다음 조합으로 강등 재시도한다.
+    - reasoning 모델(gpt-5 등): reasoning_effort+json → json만 → plain
+      (reasoning_effort 미지원/거부 시에도 json 모드만으로 성공하도록)
+    - 일반 모델: temperature+json → json만 → plain
+    """
+    base_json = {"response_format": {"type": "json_object"}}
+    if _is_reasoning_model(STRATEGIST_OPENAI_MODEL):
+        return [
+            ("reasoning+json", {"reasoning_effort": STRATEGIST_REASONING_EFFORT, **base_json}),
+            ("json_only", dict(base_json)),
+            ("plain", {}),
+        ]
+    return [
+        ("temperature+json", {"temperature": STRATEGIST_TEMPERATURE, **base_json}),
+        ("json_only", dict(base_json)),
+        ("plain", {}),
+    ]
 
 _KST = KST
 
@@ -646,6 +670,32 @@ def _compute_candidate_technicals(rows: list[dict[str, Any]], max_tickers: int =
 # Validation
 # ---------------------------------------------------------------------------
 
+def _parse_strategy_json(content: str) -> dict[str, Any]:
+    """LLM 응답 문자열을 dict 로 파싱한다(마크다운 코드펜스/앞뒤 잡텍스트 허용).
+
+    json_object 모드면 순수 JSON 이지만, plain 강등 변형에선 ```json 펜스나
+    설명 문구가 섞일 수 있어 중괄호 범위를 추출해 파싱한다.
+    """
+    text = (content or "").strip()
+    if not text:
+        raise ValueError("빈 응답")
+    if text.startswith("```"):
+        inner = text[3:]
+        if inner[:4].lower() == "json":
+            inner = inner[4:]
+        if inner.endswith("```"):
+            inner = inner[:-3]
+        text = inner.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(text[start : end + 1])
+        raise
+
+
 def _validate_strategy_json(data: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("AI 응답 JSON이 dict가 아닙니다")
@@ -745,22 +795,30 @@ async def _call_openai_strategy(
     input_json = json.dumps(user_content, ensure_ascii=False)
     t_start = datetime.now()
 
+    messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": input_json},
+    ]
+
     def _create() -> Any:
-        kwargs: dict[str, Any] = {
-            "model": STRATEGIST_OPENAI_MODEL,
-            "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": input_json},
-            ],
-            "response_format": {"type": "json_object"},
-        }
-        # reasoning 모델(gpt-5/o1/o3): reasoning_effort 로 응답 시간 단축, temperature 미지원.
-        # 일반 모델: temperature 지정.
-        if _is_reasoning_model(STRATEGIST_OPENAI_MODEL):
-            kwargs["reasoning_effort"] = STRATEGIST_REASONING_EFFORT
-        else:
-            kwargs["temperature"] = STRATEGIST_TEMPERATURE
-        return _client.chat.completions.create(**kwargs)
+        # 파라미터 조합을 우선순위대로 시도 — 400(예: reasoning_effort 미지원) 시 강등 재시도.
+        last_exc: BadRequestError | None = None
+        for name, extra in _completion_param_variants():
+            try:
+                return _client.chat.completions.create(
+                    model=STRATEGIST_OPENAI_MODEL,
+                    messages=messages,
+                    **extra,
+                )
+            except BadRequestError as e:
+                logger.warning(
+                    "전략가 OpenAI 400 (variant=%s) — 다음 조합으로 재시도: %s",
+                    name, getattr(e, "message", None) or e,
+                )
+                last_exc = e
+                continue
+        assert last_exc is not None
+        raise last_exc
 
     # 외부 timeout: httpx 레벨 timeout 이 동작 안 할 케이스(스레드 스택 등) 대비 이중 안전망.
     outer_timeout = STRATEGIST_OPENAI_TIMEOUT_SEC + STRATEGIST_OPENAI_THREAD_BUFFER_SEC
@@ -794,8 +852,8 @@ async def _call_openai_strategy(
 
     content = resp.choices[0].message.content or ""
     try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError as e:
+        parsed = _parse_strategy_json(content)
+    except (json.JSONDecodeError, ValueError) as e:
         logger.warning(
             "전략가 응답 JSON 파싱 실패: %s | 응답 앞 500자: %r", e, content[:500]
         )
