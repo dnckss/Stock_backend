@@ -804,43 +804,7 @@ def backfill_missing_volume(candidates: list[dict]) -> int:
 # ---------------------------------------------------------------------------
 
 # Ticker 별 마지막 성공값 메모리 캐시 — Yahoo 일시 차단 시 stale fallback 으로 사용.
-# DB(macro_cache)에 영속화하여 서버 재시작 후에도 복원 → 차단 중에도 빈칸 대신 직전값 표시.
 _macro_value_cache: dict[str, dict] = {}
-
-
-def load_macro_value_cache_from_db() -> int:
-    """DB 에 저장된 per-ticker 마지막 정상값을 메모리 캐시로 복원한다(복원 개수 반환).
-
-    서버 기동 시 1회 호출 — 이후 yfinance 차단이어도 _fetch_macro_value 가
-    이 캐시에서 stale 값을 반환해 매크로/VIX/게이지가 null 로 비지 않는다.
-    """
-    from services.crud import get_macro_value_cache
-
-    saved = get_macro_value_cache()
-    count = 0
-    for ticker, val in (saved or {}).items():
-        if isinstance(val, dict) and val.get("value") is not None:
-            # 복원분은 stale 로 표시 — 라이브 조회 성공 시 stale=False 로 덮어쓴다.
-            _macro_value_cache[ticker] = {
-                "value": val.get("value"),
-                "change": val.get("change"),
-                "pct": val.get("pct"),
-                "stale": True,
-            }
-            count += 1
-    return count
-
-
-def persist_macro_value_cache() -> None:
-    """메모리 캐시의 실제 값(value 있는 항목)만 DB 에 영속화한다."""
-    from services.crud import save_macro_value_cache
-
-    snapshot = {
-        t: v for t, v in _macro_value_cache.items()
-        if isinstance(v, dict) and v.get("value") is not None
-    }
-    if snapshot:
-        save_macro_value_cache(snapshot)
 
 
 def _fetch_macro_value(ticker: str, decimals: int) -> dict:
@@ -852,16 +816,13 @@ def _fetch_macro_value(ticker: str, decimals: int) -> dict:
     from services.yf_limiter import throttled
 
     try:
-        # fast_info 는 LazyDict — 키 접근(lastPrice 등)이 곧 lazy fetch 다.
-        # 그 접근을 throttled 안에서 수행해야 야후 일시 차단(NoneType 등)에도
-        # 백오프 재시도가 적용된다(밖에서 하면 throttled 가 차단을 못 본다).
-        def _fetch() -> tuple:
-            fi = yf.Ticker(ticker).fast_info
-            if fi is None:
-                raise ValueError("fast_info returned None (yfinance 차단 의심)")
-            return fi.get("lastPrice"), fi.get("previousClose")
+        fi = throttled(lambda: yf.Ticker(ticker).fast_info)
+        if fi is None:
+            raise ValueError("fast_info returned None (yfinance 차단 의심)")
 
-        price, prev_close = throttled(_fetch)
+        # fast_info 는 LazyDict — 키 접근 자체가 lazy fetch 라 try 안에서 보호
+        price = fi.get("lastPrice")
+        prev_close = fi.get("previousClose")
 
         if price is None or not math.isfinite(price):
             raise ValueError("invalid lastPrice")

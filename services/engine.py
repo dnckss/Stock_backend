@@ -244,10 +244,6 @@ async def run_macro_loop():
             latest_cache["updated_at"] = datetime.now().isoformat()
             await manager.broadcast({"type": "MARKET_UPDATE", **sanitize_for_json(latest_cache)})
 
-            # per-ticker 마지막 정상값을 DB 에 영속화 — 재시작/야후 차단 시 복원용.
-            from services.scanner import persist_macro_value_cache
-            await asyncio.to_thread(persist_macro_value_cache)
-
             logger.info("매크로 지표 %s개 업데이트 완료", count)
             failures = 0
             await asyncio.sleep(MACRO_INTERVAL_SEC)

@@ -45,24 +45,6 @@ def _is_rate_limit(exc: BaseException) -> bool:
     return "rate limit" in msg or "too many requests" in msg
 
 
-def _is_transient_block(exc: BaseException) -> bool:
-    """야후 일시 차단 정황을 throttle 신호로 간주한다(백오프 재시도 대상).
-
-    명시적 429/RateLimit 외에, 야후가 빈/에러 본문을 줄 때 yfinance 내부가
-    None 을 인덱싱하며 내는 ``'NoneType' object is not subscriptable`` 나
-    빈 본문 JSON 디코드 실패(``Expecting value``) 도 소프트 차단으로 본다.
-    즉시 실패시키면 우수수 쏟아지므로, 백오프로 한 박자 쉬고 재시도한다.
-    """
-    if _is_rate_limit(exc):
-        return True
-    msg = str(exc).lower()
-    if "nonetype" in msg and "subscriptable" in msg:
-        return True
-    if "expecting value" in msg:
-        return True
-    return False
-
-
 def throttled(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     """yfinance 함수를 글로벌 속도 제한 + 자동 재시도로 감싼다.
 
@@ -85,12 +67,12 @@ def throttled(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
             try:
                 return fn(*args, **kwargs)
             except Exception as e:
-                if not (_is_transient_block(e) and attempt < YF_RATE_LIMIT_RETRIES):
+                if not (_is_rate_limit(e) and attempt < YF_RATE_LIMIT_RETRIES):
                     raise
         # sem 해제 후 백오프 — 슬롯을 점유하지 않음
         delay = YF_RATE_LIMIT_BACKOFF_SEC * (2 ** (attempt - 1))
         logger.warning(
-            "yfinance 일시 차단/속도제한 (시도 %d/%d), %.1fs 대기 후 재시도",
+            "yfinance rate limit (시도 %d/%d), %.1fs 대기 후 재시도",
             attempt, YF_RATE_LIMIT_RETRIES, delay,
         )
         time.sleep(delay)
