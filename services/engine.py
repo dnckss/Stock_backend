@@ -416,7 +416,10 @@ async def run_strategy_warmup_loop():
             market_gauge = latest_cache.get("market_gauge")
             vix = latest_cache.get("vix")
             news_feed = latest_cache.get("news_feed")
-            await refresh_market_strategy_cache(macro, market_gauge, vix, news_feed)
+            # force=True: 캐시가 아직 fresh 해도 주기마다 강제 재빌드(매시간 최신화).
+            await refresh_market_strategy_cache(
+                macro, market_gauge, vix, news_feed, force=True,
+            )
             logger.info(
                 "AI 전략 자동 워밍 완료 (%.1fs)",
                 (datetime.now() - start).total_seconds(),

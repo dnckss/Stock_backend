@@ -18,6 +18,7 @@ from config import (
     KST,
     OPENAI_API_KEY,
     STRATEGIST_CACHE_TTL_SEC,
+    STRATEGIST_FALLBACK_TTL_SEC,
     STRATEGIST_DIVERGENCE_FALLBACK,
     STRATEGIST_ECON_LOOKBACK_HOURS,
     STRATEGIST_ECON_MAX_SURPRISES,
@@ -164,6 +165,7 @@ _REQUIRED_KEYS = frozenset({"market_summary", "top_sector", "recommendations"})
 
 _strategy_cache: dict[str, Any] | None = None
 _strategy_cache_at: datetime | None = None
+_strategy_cache_is_fallback = False  # 마지막 캐시가 폴백(OpenAI 실패 등)인지 — 짧은 TTL 로 빨리 재시도
 _strategy_lock = asyncio.Lock()
 # SWR(stale-while-revalidate) 백그라운드 갱신이 동시에 여러 개 떠 OpenAI 가
 # 중복 호출되는 것을 막는 in-flight 가드.
@@ -1019,6 +1021,8 @@ def _empty_response() -> dict[str, Any]:
         "sector_chart": [],
         "fear_greed": {"gauge": None, "label": "-", "vix": None},
         "generated_at": datetime.now().isoformat(),
+        # 데이터가 아직 없는 상태 — 짧은 TTL 로 곧 재시도되도록 폴백 취급.
+        "is_fallback": True,
     })
 
 
@@ -1034,6 +1038,7 @@ def _fatal_response(exc: BaseException) -> dict[str, Any]:
         "sector_chart": [],
         "fear_greed": {"gauge": None, "label": "-", "vix": None},
         "generated_at": datetime.now().isoformat(),
+        "is_fallback": True,
     })
 
 
@@ -1055,10 +1060,12 @@ def _gauge_label(gauge: int | None) -> str:
     return "극도공포"
 
 
-def _is_cache_fresh(at: datetime | None) -> bool:
+def _is_cache_fresh(at: datetime | None, is_fallback: bool = False) -> bool:
     if at is None:
         return False
-    return (datetime.now() - at).total_seconds() < STRATEGIST_CACHE_TTL_SEC
+    # 폴백 응답은 짧은 TTL 로 취급 — 빨리 stale 판정해 SWR/워밍이 재시도하게 한다.
+    ttl = STRATEGIST_FALLBACK_TTL_SEC if is_fallback else STRATEGIST_CACHE_TTL_SEC
+    return (datetime.now() - at).total_seconds() < ttl
 
 
 async def build_market_strategy(
@@ -1115,6 +1122,8 @@ async def build_market_strategy(
     }
 
     response = _assemble_response(strategy_json, sector_data, sector_etf, technicals, fear_greed)
+    # 폴백 여부를 응답에 표기 — 캐시 TTL 판정 및 프런트의 '갱신 중' 안내에 활용.
+    response["is_fallback"] = is_fallback
 
     # AI 추천을 strategy_history 에 영구 저장 (백테스트용).
     # fallback 응답은 품질이 낮아 저장하지 않는다.
@@ -1129,17 +1138,26 @@ async def refresh_market_strategy_cache(
     market_gauge: int | None,
     vix: float | None,
     news_feed: list[dict[str, Any]] | None = None,
+    *,
+    force: bool = False,
 ) -> dict[str, Any]:
     """전략 브리핑을 새로 빌드해 캐시에 저장한다(락으로 중복 빌드 방지).
 
     1시간 주기 워밍 루프(run_strategy_warmup_loop)와 SWR 백그라운드 갱신이 공유.
+    - force=False: 락 대기 중 다른 경로가 이미 fresh 캐시를 만들었으면 재사용(중복 호출 방지).
+    - force=True: 워밍 루프 전용 — fresh 여부와 무관하게 항상 재빌드(주기적 강제 갱신).
     빌드 실패 시 기존 캐시를 유지하고, 캐시조차 없으면 _fatal_response 를 캐싱한다.
     """
-    global _strategy_cache, _strategy_cache_at
+    global _strategy_cache, _strategy_cache_at, _strategy_cache_is_fallback
 
     async with _strategy_lock:
         # 락 대기 중 다른 경로가 이미 갱신했으면 그 결과를 재사용(중복 OpenAI 호출 방지).
-        if _is_cache_fresh(_strategy_cache_at) and _strategy_cache is not None:
+        # force(워밍)는 이 단축 경로를 건너뛰고 무조건 재빌드한다.
+        if (
+            not force
+            and _is_cache_fresh(_strategy_cache_at, _strategy_cache_is_fallback)
+            and _strategy_cache is not None
+        ):
             return _strategy_cache
         try:
             result = await build_market_strategy(macro, market_gauge, vix, news_feed)
@@ -1151,6 +1169,7 @@ async def refresh_market_strategy_cache(
 
         _strategy_cache = result
         _strategy_cache_at = datetime.now()
+        _strategy_cache_is_fallback = bool(result.get("is_fallback"))
         return _strategy_cache
 
 
@@ -1189,10 +1208,10 @@ async def get_cached_market_strategy(
     - 캐시 없음(cold start): 워밍 전 첫 진입에 한해 동기 빌드.
     평상시엔 run_strategy_warmup_loop 가 1시간 주기로 미리 채워 항상 캐시 hit 이다.
     """
-    if _is_cache_fresh(_strategy_cache_at) and _strategy_cache is not None:
+    if _is_cache_fresh(_strategy_cache_at, _strategy_cache_is_fallback) and _strategy_cache is not None:
         return _strategy_cache
 
-    # stale 이지만 직전 결과가 있으면 즉시 주고 백그라운드로만 갱신(SWR).
+    # stale(또는 폴백이 짧은 TTL 경과) 이지만 직전 결과가 있으면 즉시 주고 백그라운드로만 갱신(SWR).
     if _strategy_cache is not None:
         _spawn_strategy_refresh(macro, market_gauge, vix, news_feed)
         return _strategy_cache

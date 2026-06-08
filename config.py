@@ -212,6 +212,9 @@ STRATEGIST_CACHE_TTL_SEC = int(os.getenv("STRATEGIST_CACHE_TTL_SEC", "5400"))
 STRATEGIST_AUTO_WARMUP_ENABLED = _bool_env("STRATEGIST_AUTO_WARMUP_ENABLED", "true")
 STRATEGIST_AUTO_WARMUP_INTERVAL_SEC = int(os.getenv("STRATEGIST_AUTO_WARMUP_INTERVAL_SEC", "3600"))  # 1시간
 STRATEGIST_AUTO_WARMUP_INITIAL_DELAY_SEC = int(os.getenv("STRATEGIST_AUTO_WARMUP_INITIAL_DELAY_SEC", "20"))
+# - 폴백(OpenAI 호출 실패 등) 응답은 짧은 TTL 로 취급해 빨리 재시도/자가복구한다.
+#   (정상 캐시는 STRATEGIST_CACHE_TTL_SEC 적용, 폴백만 이 값으로 stale 판정)
+STRATEGIST_FALLBACK_TTL_SEC = int(os.getenv("STRATEGIST_FALLBACK_TTL_SEC", "300"))  # 5분
 # - yfinance Ticker.info(섹터) 호출은 타임아웃 위험이 있어
 #   요청당 최대 호출 개수로 제한하고, 결과는 프로세스 내 캐싱한다.
 STRATEGIST_MAX_YFINANCE_SECTOR_CALLS_PER_REQUEST = 20
