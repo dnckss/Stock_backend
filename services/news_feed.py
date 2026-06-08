@@ -162,6 +162,24 @@ def _parse_news_item(item: dict, fallback_ticker: str) -> dict[str, Any] | None:
     }
 
 
+def _db_item_to_feed_item(db_item: dict[str, Any]) -> dict[str, Any]:
+    """DB(news_items) 행을 피드 항목 형태로 변환한다(라이브 피드와 동일 필드, 단일 출처)."""
+    return {
+        "title": db_item.get("title", ""),
+        "publisher": db_item.get("publisher", ""),
+        "timestamp": db_item.get("timestamp", 0),
+        "ticker": db_item.get("ticker"),
+        "url": db_item.get("url", ""),
+        "url_hash": db_item.get("url_hash", ""),
+        "score": db_item.get("sentiment_score", 0.0),
+        "sentiment_label": db_item.get("sentiment_label", "neutral"),
+        "sentiment_polarity": db_item.get("sentiment_polarity", "neutral"),
+        "sentiment_ko": db_item.get("sentiment_ko", "중립"),
+        "confidence": db_item.get("confidence", 0.0),
+        "has_article": db_item.get("has_article", False),
+    }
+
+
 async def build_news_feed(tickers: list[str]) -> list[dict[str, Any]]:
     """
     yfinance Ticker.get_news()로 뉴스를 수집하고
@@ -199,6 +217,19 @@ async def build_news_feed(tickers: list[str]) -> list[dict[str, Any]]:
                 raw_items.append(parsed)
 
     if not raw_items:
+        # yfinance 차단 등으로 신규 수집이 0건이면 DB(news_items) 최신값으로 폴백 —
+        # 매크로처럼 뉴스도 '없으면 DB의 직전 정보라도' 보여주기 위함.
+        try:
+            from services.crud import get_news_items
+            db_items = get_news_items(limit=NEWS_FEED_MAX_ITEMS)
+            if db_items:
+                feed = enrich_feed_with_llm([_db_item_to_feed_item(d) for d in db_items])
+                _cache = feed
+                _cache_at = datetime.now()
+                logger.info("뉴스 신규 수집 0건 — DB 최신 %d건으로 폴백", len(feed))
+                return _cache
+        except Exception as e:
+            logger.warning("뉴스 DB 폴백 실패: %s", e)
         _cache = []
         _cache_at = datetime.now()
         return _cache
@@ -251,20 +282,7 @@ async def build_news_feed(tickers: list[str]) -> list[dict[str, Any]]:
                 if not h or h in seen_hashes:
                     continue
                 seen_hashes.add(h)
-                feed.append({
-                    "title": db_item.get("title", ""),
-                    "publisher": db_item.get("publisher", ""),
-                    "timestamp": db_item.get("timestamp", 0),
-                    "ticker": db_item.get("ticker"),
-                    "url": db_item.get("url", ""),
-                    "url_hash": h,
-                    "score": db_item.get("sentiment_score", 0.0),
-                    "sentiment_label": db_item.get("sentiment_label", "neutral"),
-                    "sentiment_polarity": db_item.get("sentiment_polarity", "neutral"),
-                    "sentiment_ko": db_item.get("sentiment_ko", "중립"),
-                    "confidence": db_item.get("confidence", 0.0),
-                    "has_article": db_item.get("has_article", False),
-                })
+                feed.append(_db_item_to_feed_item(db_item))
                 if len(feed) >= NEWS_FEED_MAX_ITEMS:
                     break
             feed.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
