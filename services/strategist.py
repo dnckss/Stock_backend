@@ -185,7 +185,8 @@ _SYSTEM_PROMPT = """\
 }
 ```"""
 
-_REQUIRED_KEYS = frozenset({"market_summary", "top_sector", "recommendations"})
+# recommendations 는 빈 배열('매수 후보 없음')도 정상 상태이므로 필수 키에서 제외한다.
+_REQUIRED_KEYS = frozenset({"market_summary", "top_sector"})
 
 _strategy_cache: dict[str, Any] | None = None
 _strategy_cache_at: datetime | None = None
@@ -710,18 +711,17 @@ def _validate_strategy_json(data: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(top_sector, dict) or not top_sector.get("name"):
         raise ValueError("top_sector 구조 오류")
 
+    # 추천(recommendations): 빈 배열은 '매수 후보 없음'의 정상 상태다(프롬프트가 약세
+    # 국면에 추천을 비우도록 허용). 빈/누락을 예외로 처리하지 않고 빈 배열로 정규화하며,
+    # top_picks 키 호환을 유지한다. (예전엔 여기서 raise → 약세장마다 폴백으로 떨어졌다.)
     recs = data.get("recommendations")
-    if not isinstance(recs, list) or not recs:
-        # top_picks 호환
-        recs = data.get("top_picks")
-        if isinstance(recs, list) and recs:
-            data["recommendations"] = recs
-        else:
-            raise ValueError("recommendations가 비어 있습니다")
-
-    for i, pick in enumerate(data["recommendations"]):
-        if not isinstance(pick, dict) or not pick.get("ticker"):
-            raise ValueError(f"recommendations[{i}] 구조 오류")
+    if not isinstance(recs, list):
+        alt = data.get("top_picks")
+        recs = alt if isinstance(alt, list) else []
+    # ticker 없는 손상 항목은 예외 대신 제거 — 일부가 깨져도 나머지 분석은 살린다.
+    data["recommendations"] = [
+        pick for pick in recs if isinstance(pick, dict) and pick.get("ticker")
+    ]
 
     # 전략실은 매수(BUY) 후보만 노출·저장한다. 프롬프트로 BUY 만 생성하도록 했지만,
     # 모델이 SELL/숏을 반환해도 여기서 방어적으로 제거하고 direction 을 BUY 로 정규화한다.
