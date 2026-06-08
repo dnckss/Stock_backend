@@ -816,13 +816,16 @@ def _fetch_macro_value(ticker: str, decimals: int) -> dict:
     from services.yf_limiter import throttled
 
     try:
-        fi = throttled(lambda: yf.Ticker(ticker).fast_info)
-        if fi is None:
-            raise ValueError("fast_info returned None (yfinance 차단 의심)")
+        # fast_info 는 LazyDict — 키 접근(lastPrice 등)이 곧 lazy fetch 다.
+        # 그 접근을 throttled 안에서 수행해야 야후 일시 차단(NoneType 등)에도
+        # 백오프 재시도가 적용된다(밖에서 하면 throttled 가 차단을 못 본다).
+        def _fetch() -> tuple:
+            fi = yf.Ticker(ticker).fast_info
+            if fi is None:
+                raise ValueError("fast_info returned None (yfinance 차단 의심)")
+            return fi.get("lastPrice"), fi.get("previousClose")
 
-        # fast_info 는 LazyDict — 키 접근 자체가 lazy fetch 라 try 안에서 보호
-        price = fi.get("lastPrice")
-        prev_close = fi.get("previousClose")
+        price, prev_close = throttled(_fetch)
 
         if price is None or not math.isfinite(price):
             raise ValueError("invalid lastPrice")

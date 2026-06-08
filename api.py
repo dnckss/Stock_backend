@@ -19,6 +19,11 @@ try:
 except AttributeError:
     pass
 
+# yfinance 자체 로거의 "Failed download ... TypeError" ERROR 스팸을 잠재운다.
+# 야후 일시 차단 시 수십 줄씩 쏟아져 진짜 에러를 가리는데, 앱은 이 실패를
+# 자체 WARNING + stale 캐시/DB 폴백으로 이미 처리하므로 중복·오해 소지가 크다.
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+
 logger = logging.getLogger(__name__)
 logger.info("api.py import 시작 (Python %s)", sys.version.split()[0])
 logger.info(

@@ -211,7 +211,8 @@ STRATEGIST_CACHE_TTL_SEC = int(os.getenv("STRATEGIST_CACHE_TTL_SEC", "5400"))
 #   사용자 진입 시 무거운 OpenAI 호출 없이 캐시 hit 으로 즉시 응답(stale-while-revalidate).
 STRATEGIST_AUTO_WARMUP_ENABLED = _bool_env("STRATEGIST_AUTO_WARMUP_ENABLED", "true")
 STRATEGIST_AUTO_WARMUP_INTERVAL_SEC = int(os.getenv("STRATEGIST_AUTO_WARMUP_INTERVAL_SEC", "3600"))  # 1시간
-STRATEGIST_AUTO_WARMUP_INITIAL_DELAY_SEC = int(os.getenv("STRATEGIST_AUTO_WARMUP_INITIAL_DELAY_SEC", "20"))
+# 기동 직후 스캔/매크로의 yfinance 버스트와 겹치지 않게 워밍 시작을 늦춘다(야후 차단 완화).
+STRATEGIST_AUTO_WARMUP_INITIAL_DELAY_SEC = int(os.getenv("STRATEGIST_AUTO_WARMUP_INITIAL_DELAY_SEC", "90"))
 # - 폴백(OpenAI 호출 실패 등) 응답은 짧은 TTL 로 취급해 빨리 재시도/자가복구한다.
 #   (정상 캐시는 STRATEGIST_CACHE_TTL_SEC 적용, 폴백만 이 값으로 stale 판정)
 STRATEGIST_FALLBACK_TTL_SEC = int(os.getenv("STRATEGIST_FALLBACK_TTL_SEC", "300"))  # 5분
