@@ -503,10 +503,18 @@ def _compute_metrics(returns_pct: list[float]) -> dict[str, Any]:
 
 def _compute_equity_curve(
     dated_returns: list[tuple[date, float]],
+    horizon: int = 1,
 ) -> dict[str, Any]:
     """
-    exit 날짜별로 동등가중 일간 수익률을 집계하고 복리 누적 → equity curve.
-    Sharpe(연환산)와 Max Drawdown 산출.
+    exit 날짜별 동등가중 수익률을 '겹치지 않는 보유기간 단위'로 복리해 equity curve 를 만든다.
+
+    각 평가의 수익률은 horizon(거래일) 보유수익률이다. 신호가 매 거래일 진입/청산되면
+    구간이 겹치는데, 같은 자본을 매일 재투자한 것처럼 일 단위로 복리하면 누적수익·Sharpe 가
+    약 horizon 배 부풀려진다(예: 20일 보유수익을 ~75회 일복리 → 누적 +176%, Sharpe 22).
+    이를 막기 위해 단일 계좌 순차 운용을 가정한다:
+      - 청산일을 정렬해 horizon 거래일 간격(겹치지 않는 시점)만 골라 복리한다.
+      - Sharpe/Sortino 연환산도 연간 구간 수(252/horizon)에 맞춘다.
+    horizon=1 이면 기존 일 단위 복리와 동일하다.
     """
     if not dated_returns:
         return {
@@ -526,16 +534,21 @@ def _compute_equity_curve(
         daily_bucket[d].append(ret_pct / 100.0)
 
     sorted_days = sorted(daily_bucket.keys())
+    # 겹치지 않는 보유기간 단위로 청산일을 추린다 — 청산일은 거래일마다 발생하므로
+    # 정렬된 distinct 청산일을 horizon 간격으로 stride 하면 ~horizon 거래일 간격이 된다.
+    step = max(1, int(horizon))
+    picked_days = sorted_days[::step]
+
     equity = 1.0
     peak = 1.0
     max_dd = 0.0
     curve: list[dict[str, Any]] = []
-    daily_returns: list[float] = []
+    step_returns: list[float] = []
 
-    for d in sorted_days:
-        day_ret = statistics.fmean(daily_bucket[d])  # 동일 exit 일 평균
-        daily_returns.append(day_ret)
-        equity *= 1.0 + day_ret
+    for d in picked_days:
+        step_ret = statistics.fmean(daily_bucket[d])  # 해당 청산일 바스켓 평균
+        step_returns.append(step_ret)
+        equity *= 1.0 + step_ret
         if equity > peak:
             peak = equity
         if peak > 0:
@@ -545,28 +558,29 @@ def _compute_equity_curve(
         curve.append({
             "date": d.isoformat(),
             "equity": _round(equity, 4),
-            "return_pct": _round(day_ret * 100, 2),
+            "return_pct": _round(step_ret * 100, 2),
         })
 
-    # Sharpe / Sortino (rf=0, 일간 수익률 기준 연환산)
+    # Sharpe / Sortino (rf=0) — 구간 길이가 horizon 거래일이므로 연간 구간 수로 환산.
+    periods_per_year = BACKTEST_ANNUALIZATION_FACTOR / step
     sharpe: float | None = None
     sortino: float | None = None
-    if len(daily_returns) > 1:
-        mean_r = statistics.fmean(daily_returns)
-        std_r = statistics.pstdev(daily_returns)
+    if len(step_returns) > 1:
+        mean_r = statistics.fmean(step_returns)
+        std_r = statistics.pstdev(step_returns)
         if std_r > 0:
-            sharpe = (mean_r / std_r) * math.sqrt(BACKTEST_ANNUALIZATION_FACTOR)
-        # Sortino: 하방 편차만 분모로 (target=0, 모든 구간 대상 min(0,r)^2 평균의 sqrt)
-        downside_var = statistics.fmean([min(0.0, r) ** 2 for r in daily_returns])
+            sharpe = (mean_r / std_r) * math.sqrt(periods_per_year)
+        # Sortino: 하방 편차만 분모로 (target=0, min(0,r)^2 평균의 sqrt)
+        downside_var = statistics.fmean([min(0.0, r) ** 2 for r in step_returns])
         downside_dev = math.sqrt(downside_var)
         if downside_dev > 0:
-            sortino = (mean_r / downside_dev) * math.sqrt(BACKTEST_ANNUALIZATION_FACTOR)
+            sortino = (mean_r / downside_dev) * math.sqrt(periods_per_year)
 
     # CAGR (연복리) — curve 의 달력 구간 기준. Calmar = CAGR / |MDD|.
     # 구간이 너무 짧으면 연환산이 비현실적으로 폭증하므로 최소 span 미만은 None.
     cagr: float | None = None
-    if len(sorted_days) >= 2 and equity > 0:
-        span_days = (sorted_days[-1] - sorted_days[0]).days
+    if len(picked_days) >= 2 and equity > 0:
+        span_days = (picked_days[-1] - picked_days[0]).days
         if span_days >= BACKTEST_CAGR_MIN_SPAN_DAYS:
             years = span_days / 365.25
             if years > 0:
@@ -584,7 +598,7 @@ def _compute_equity_curve(
         "sortino_ratio": _round(sortino, 2) if sortino is not None else None,
         "calmar_ratio": _round(calmar, 2) if calmar is not None else None,
         "cagr_pct": _round(cagr, 2) if cagr is not None else None,
-        "days": len(sorted_days),
+        "days": len(picked_days),
     }
 
 
@@ -909,7 +923,7 @@ def _run_signals_backtest_sync(
                 lambda e: e.record.get("signal_source"),
             ),
             "top_tickers": _per_ticker_top(evals),
-            "equity": _compute_equity_curve([(e.exit_date, e.adjusted_return_pct) for e in evals]),
+            "equity": _compute_equity_curve([(e.exit_date, e.adjusted_return_pct) for e in evals], h),
             "benchmark": _benchmark_for_evals(bench_series, evals),
         }
 
@@ -1096,7 +1110,7 @@ def _run_strategist_backtest_sync(
             "by_exit_reason": _bucket_metrics(evals, lambda e: e.exit_reason, min_samples=1),
             "exit_reason_counts": _count_exit_reasons(evals),
             "top_tickers": _per_ticker_top(evals),
-            "equity": _compute_equity_curve([(e.exit_date, e.adjusted_return_pct) for e in evals]),
+            "equity": _compute_equity_curve([(e.exit_date, e.adjusted_return_pct) for e in evals], h),
             "benchmark": _benchmark_for_evals(bench_series, evals),
         }
 
