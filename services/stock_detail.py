@@ -49,10 +49,11 @@ _full_backfill_lock = threading.Lock()
 def _maybe_backfill_full_history(ticker: str) -> None:
     """일봉 이상 차트 요청 시, DB 히스토리가 얕으면 해당 종목 풀히스토리를 1회 백필.
 
+    **백그라운드 스레드에서 수행해 차트 응답을 막지 않는다(첫 진입 지연 제거).**
+    호출부는 DB 에 있는 만큼을 즉시 반환하고, 더 깊은 히스토리는 다음 방문에 반영된다.
     DB 의 최초 일자가 COVERAGE_MIN_DAYS 보다 최근이면 '상장 이후 전체가 아직 없음'으로
-    보고 backfill_full_history([ticker]) 를 동기 실행한다. upsert 라 idempotent.
-    실제 상장이 오래되지 않은 종목은 백필해도 여전히 얕지만, attempted set 으로
-    재시도를 차단한다.
+    보고 backfill_full_history([ticker]) 를 실행한다. upsert 라 idempotent.
+    프로세스 단위로 종목당 1회만 시도(attempted set)해 재호출/무한재시도를 막는다.
     """
     if not PRICE_BACKFILL_FULL_HISTORY_ENABLED:
         return
@@ -64,23 +65,27 @@ def _maybe_backfill_full_history(ticker: str) -> None:
             return
         _full_backfill_attempted.add(upper)  # 동시 요청/재요청 모두 1회로 제한
 
-    try:
-        from services.price_store import get_ohlcv_db, backfill_full_history
-        df = get_ohlcv_db(upper)
-        if df is not None and not df.empty:
-            earliest = pd.Timestamp(df.index.min())
-            if earliest.tzinfo is not None:
-                earliest = earliest.tz_localize(None)
-            threshold = pd.Timestamp.now().normalize() - pd.Timedelta(
-                days=PRICE_HISTORY_COVERAGE_MIN_DAYS
-            )
-            if earliest <= threshold:
-                return  # 이미 충분한 과거까지 보유 → 백필 불필요
-        logger.info("온디맨드 풀히스토리 백필 시작: %s", upper)
-        result = backfill_full_history([upper])
-        logger.info("온디맨드 풀히스토리 백필 완료: %s — %s", upper, result)
-    except Exception as e:
-        logger.warning("온디맨드 풀히스토리 백필 실패 (%s): %s", upper, e)
+    def _run() -> None:
+        try:
+            from services.price_store import get_ohlcv_db, backfill_full_history
+            df = get_ohlcv_db(upper)
+            if df is not None and not df.empty:
+                earliest = pd.Timestamp(df.index.min())
+                if earliest.tzinfo is not None:
+                    earliest = earliest.tz_localize(None)
+                threshold = pd.Timestamp.now().normalize() - pd.Timedelta(
+                    days=PRICE_HISTORY_COVERAGE_MIN_DAYS
+                )
+                if earliest <= threshold:
+                    return  # 이미 충분한 과거까지 보유 → 백필 불필요
+            logger.info("온디맨드 풀히스토리 백필 시작(백그라운드): %s", upper)
+            result = backfill_full_history([upper])
+            logger.info("온디맨드 풀히스토리 백필 완료: %s — %s", upper, result)
+        except Exception as e:
+            logger.warning("온디맨드 풀히스토리 백필 실패 (%s): %s", upper, e)
+
+    # 차트 응답을 막지 않도록 데몬 스레드로 분리(요청 스레드는 즉시 반환).
+    threading.Thread(target=_run, name=f"chart-backfill-{upper}", daemon=True).start()
 
 
 def _chart_ttl_for(period_key: str) -> int:
@@ -330,7 +335,8 @@ def fetch_chart(ticker: str, period: str = "1D") -> list[dict[str, Any]]:
     # 일봉 이상(day/week/month/year)은 DB(price_history) 에서 직접 — bootstrap 후 yfinance 미사용.
     # DB 가 비어 있을 때(bootstrap 전 또는 non-S&P 종목)만 아래 yfinance 경로로 fallback.
     if key not in _CHART_INTRADAY_KEYS:
-        # DB 히스토리가 얕으면(상장 이후 전체 미보유) 해당 종목만 1회 풀히스토리 백필.
+        # DB 에 있는 만큼 즉시 반환하고, 히스토리가 얕으면 풀히스토리 백필은 백그라운드로
+        # 돌린다(응답 비차단 — 첫 진입 지연 제거). 더 깊은 과거는 다음 방문에 반영.
         _maybe_backfill_full_history(upper)
         db_bars = _chart_bars_from_db(upper, key)
         if db_bars:
