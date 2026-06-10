@@ -97,6 +97,9 @@ STRATEGIST_OPENAI_THREAD_BUFFER_SEC = int(os.getenv("STRATEGIST_OPENAI_THREAD_BU
 STRATEGIST_REASONING_EFFORT = os.getenv("STRATEGIST_REASONING_EFFORT", "medium")
 # OpenAI 실패 시 fallback top_picks 개수 (스캔 rows 앞에서 N개)
 STRATEGIST_FALLBACK_TOP_PICKS_N = int(os.getenv("STRATEGIST_FALLBACK_TOP_PICKS_N", "2"))
+# AI 전략가가 약세 국면 등으로 추천을 비웠을 때, 스캔 BUY 시그널로 채울 최소 추천 개수
+# (전략실에 추천이 항상 노출되도록 보장하는 안전망).
+STRATEGIST_MIN_RECOMMENDATIONS = int(os.getenv("STRATEGIST_MIN_RECOMMENDATIONS", "3"))
 
 # Scanner
 MIN_VOLUME = 1_000_000

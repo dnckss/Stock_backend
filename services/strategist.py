@@ -29,6 +29,7 @@ from config import (
     STRATEGIST_ENTRY_DEVIATION_THRESHOLD,
     STRATEGIST_ENTRY_NORMALIZED_BAND_PCT,
     STRATEGIST_FALLBACK_TOP_PICKS_N,
+    STRATEGIST_MIN_RECOMMENDATIONS,
     STRATEGIST_GAUGE_FEAR,
     STRATEGIST_HIGH_RISK_ECON_KEYWORDS,
     STRATEGIST_MAX_YFINANCE_SECTOR_CALLS_PER_REQUEST,
@@ -107,7 +108,7 @@ _SYSTEM_PROMPT = """\
 5. **기술적 지표**: bias + signal_summary 기반 진입점/손절/목표가 판단의 보조 근거
 
 ## 해석 제약
-- 데이터가 부족하거나 신호가 모순될 때는 추천 종목 수를 2개 이하로 줄이고 confidence를 낮춰라.
+- 데이터가 부족하거나 신호가 모순될 때는 confidence를 낮추되, **추천을 완전히 비우지는 마라(최소 3개 제시)**.
 - **단일 뉴스 헤드라인 하나만으로 방향성을 결정하지 마라.** 반드시 2개 이상의 데이터 소스를 교차 확인.
 - 각 추천의 rationale에 반드시 **2개 이상의 데이터 카테고리**(매크로+기술적, 뉴스+섹터ETF 등)를 인용하라.
 - risk_warnings에는 **현재 데이터에서 확인 가능한 구체적 리스크만** 기술하라 (일반론 금지).
@@ -118,8 +119,8 @@ _SYSTEM_PROMPT = """\
 - **market_regime**: 매크로 지표 + VIX + 섹터 ETF 흐름을 종합하여 시장 국면을 판단. market_regime_conviction(0.0~1.0)으로 확신도 표현.
 - **news_themes**: 뉴스에서 시장을 움직이는 핵심 테마 2~4개를 도출해.
 - **econ_analysis**: 경제 서프라이즈의 시장 영향 + 다가오는 리스크 이벤트를 분석해.
-- **recommendations**: 3~5개 **매수(BUY) 후보** 추천 (데이터 불충분 시 2개 이하 가능). 반드시 아래 규칙:
-  - **direction**: 항상 `"BUY"` — 이 전략실은 매수 후보만 제시한다. **SELL·숏 추천 금지.** 약세 국면이라 매수 후보가 마땅치 않으면 추천 수를 줄이거나 비우고 risk_warnings에 그 이유를 설명하라.
+- **recommendations**: **항상 3~5개**의 **매수(BUY) 후보**를 제시한다(최소 3개는 반드시). 반드시 아래 규칙:
+  - **direction**: 항상 `"BUY"` — 이 전략실은 매수 후보만 제시한다. **SELL·숏 추천 금지.** 약세 국면이라 매수 후보가 마땅치 않더라도 **상대적으로 가장 나은 후보를 최소 3개는 제시**하고, confidence를 낮춘 뒤 risk_warnings에 약세 근거를 설명하라. **추천을 비우지 마라.**
   - **confidence**(high/medium/low), **confidence_score**(0.0~1.0)
   - **signal_drivers**: 이 추천을 뒷받침하는 데이터 소스 목록 (예: ["macd_bullish_cross", "sector_etf_up", "news_positive"])
   - **strategy_type**: scalp(당일) / swing(1~2주) / position(1개월+)
@@ -1068,6 +1069,54 @@ def _fallback_response(rows: list[dict[str, Any]], sector_data: list[dict[str, A
     }
 
 
+def _scan_based_buy_recs(
+    rows: list[dict[str, Any]],
+    technicals: dict[str, dict[str, Any]] | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """스캔(analysis_results) 의 BUY 시그널 종목으로 추천 후보를 만든다.
+
+    AI 전략가가 약세 국면 등으로 추천을 비웠을 때 '추천이 항상 노출되도록' 보완하는 안전망.
+    기술적 지표가 계산된 상위 후보를 우선하고 괴리율(divergence) 내림차순으로 정렬한다.
+    품질은 낮으므로 confidence=low 로 표시하고, strategy_history 에는 저장하지 않는다.
+    """
+    if limit <= 0:
+        return []
+    tech_map = technicals or {}
+    buy_rows = [
+        r for r in rows
+        if (r.get("ticker") or "").strip() and (r.get("signal") or "").upper() == "BUY"
+    ]
+    # 기술지표 보유 종목 우선 + 괴리율 내림차순.
+    buy_rows.sort(
+        key=lambda r: (
+            (r.get("ticker") or "").upper() in tech_map,
+            _safe_float(r.get("divergence")) if _safe_float(r.get("divergence")) is not None else float("-inf"),
+        ),
+        reverse=True,
+    )
+    recs: list[dict[str, Any]] = []
+    for r in buy_rows[:limit]:
+        ticker = (r.get("ticker") or "").upper()
+        tech = tech_map.get(ticker) or {}
+        recs.append({
+            "ticker": ticker,
+            "direction": "BUY",
+            "confidence": "low",
+            "confidence_score": 0.3,
+            "strategy_type": "swing",
+            "holding_period": "-",
+            "signal_drivers": ["scan_signal"],
+            "rationale": (
+                "스캔 시그널(괴리율·감성) 기반 후보입니다. AI 전략가가 약세 국면으로 직접 추천을 "
+                "제시하지 않아 스캔 데이터로 보완한 보수적 후보이니, 진입은 신중히 판단하세요."
+            ),
+            "risk_factors": "약세 국면 — 낮은 신뢰도, 보수적 접근 권장",
+            "technicals_summary": _build_signal_summary(tech) if tech else "-",
+        })
+    return recs
+
+
 def _empty_response() -> dict[str, Any]:
     return sanitize_for_json({
         "market_summary": "최근 스캔 데이터가 없습니다. 다음 업데이트를 기다려주세요.",
@@ -1179,13 +1228,24 @@ async def build_market_strategy(
         "technicals_coverage": len(technicals) if technicals else 0,
     }
 
+    # 추천이 비면(약세 국면 등으로 모델이 매수 후보를 제시하지 않은 경우) 스캔 BUY 시그널로
+    # 보완해, 전략실에 추천이 항상 노출되도록 보장한다.
+    supplemented = False
+    if not strategy_json.get("recommendations"):
+        fill = _scan_based_buy_recs(rows, technicals, STRATEGIST_MIN_RECOMMENDATIONS)
+        if fill:
+            strategy_json["recommendations"] = fill
+            strategy_json["recommendations_supplemented"] = True
+            supplemented = True
+            logger.info("전략 추천이 비어 스캔 BUY 시그널 %d개로 보완", len(fill))
+
     response = _assemble_response(strategy_json, sector_data, sector_etf, technicals, fear_greed)
     # 폴백 여부를 응답에 표기 — 캐시 TTL 판정 및 프런트의 '갱신 중' 안내에 활용.
     response["is_fallback"] = is_fallback
 
     # AI 추천을 strategy_history 에 영구 저장 (백테스트용).
-    # fallback 응답은 품질이 낮아 저장하지 않는다.
-    if not is_fallback:
+    # fallback·스캔보완 추천은 품질이 낮아 저장하지 않는다(전략가 백테스트 오염 방지).
+    if not is_fallback and not supplemented:
         await _persist_recommendations_if_changed(response)
 
     return response
