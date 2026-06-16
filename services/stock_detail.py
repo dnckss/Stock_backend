@@ -287,6 +287,16 @@ def _df_to_bars(df: pd.DataFrame) -> list[dict[str, Any]]:
     return bars
 
 
+def _db_chart_fresh(ticker: str) -> bool:
+    """차트용 DB(price_history) 일봉이 신선한지 — stale 하면 yfinance 로 다시 받게 한다."""
+    try:
+        from services.price_store import is_ticker_db_fresh
+        return is_ticker_db_fresh(ticker)
+    except Exception as e:
+        logger.debug("DB 차트 신선도 확인 실패 (%s): %s", ticker, e)
+        return True  # 확인 불가 시 기존 동작(있는 DB 사용) 유지
+
+
 def _chart_bars_from_db(ticker: str, key: str) -> list[dict[str, Any]]:
     """일봉~년봉 차트를 price_history 에서 직접 만들어 반환.
 
@@ -334,28 +344,34 @@ def fetch_chart(ticker: str, period: str = "1D") -> list[dict[str, Any]]:
 
     # 일봉 이상(day/week/month/year)은 DB(price_history) 에서 직접 — bootstrap 후 yfinance 미사용.
     # DB 가 비어 있을 때(bootstrap 전 또는 non-S&P 종목)만 아래 yfinance 경로로 fallback.
+    db_bars: list[dict[str, Any]] = []
     if key not in _CHART_INTRADAY_KEYS:
         # DB 에 있는 만큼 즉시 반환하고, 히스토리가 얕으면 풀히스토리 백필은 백그라운드로
         # 돌린다(응답 비차단 — 첫 진입 지연 제거). 더 깊은 과거는 다음 방문에 반영.
+        # 단, DB 최신 거래일이 오래됐으면(증분 backfill 누락) 마지막 봉이 며칠 전 종가라
+        # 차트·현재가가 실제와 어긋난다 → 아래 yfinance 경로로 신선하게 다시 받는다.
         _maybe_backfill_full_history(upper)
         db_bars = _chart_bars_from_db(upper, key)
-        if db_bars:
+        if db_bars and _db_chart_fresh(upper):
             with _chart_cache_lock:
                 _chart_cache[cache_key] = (time.time(), db_bars)
             return db_bars
 
     # 주/월/년봉은 일봉을 받아 DB 경로와 동일 규칙으로 리샘플 → 일관성 보장.
     # (yfinance 에는 '년' 인터벌이 없어 1wk/1mo/3mo 직접 호출 대신 일봉 리샘플로 통일)
+    # auto_adjust=False — DB(price_history)가 raw 종가로 저장되므로 값 일관성을 맞춘다.
     rule = _RESAMPLE_RULES.get(key)
     yf_period, yf_interval = ("max", "1d") if rule else preset
     try:
-        df = yf.download(ticker, period=yf_period, interval=yf_interval, progress=False)
+        df = yf.download(
+            ticker, period=yf_period, interval=yf_interval, progress=False, auto_adjust=False
+        )
     except Exception as e:
         logger.warning("차트 다운로드 실패 (%s %s): %s", ticker, period, e)
-        return []
+        return db_bars  # 신선한 데이터를 못 받으면 stale 라도 비우지 않는다
 
     if df.empty:
-        return []
+        return db_bars
 
     # MultiIndex 처리 + 컬럼명 소문자 정규화 (DB 스키마와 통일)
     if isinstance(df.columns, pd.MultiIndex):
@@ -368,7 +384,7 @@ def fetch_chart(ticker: str, period: str = "1D") -> list[dict[str, Any]]:
 
     bars = _df_to_bars(df)
     if not bars:
-        return []
+        return db_bars
 
     with _chart_cache_lock:
         _chart_cache[cache_key] = (time.time(), bars)

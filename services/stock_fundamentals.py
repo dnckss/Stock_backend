@@ -460,7 +460,7 @@ def _price_performance_from_db(ticker: str) -> pd.DataFrame | None:
     yfinance 13mo 다운로드(가장 무거운 호출)가 사라진다.
     """
     try:
-        from services.price_store import get_ohlcv_db
+        from services.price_store import get_ohlcv_db, is_ohlcv_fresh
         start = date.today() - timedelta(days=_PRICE_PERF_LOOKBACK_DAYS)
         df = get_ohlcv_db(ticker, start=start)
     except Exception as e:
@@ -471,15 +471,27 @@ def _price_performance_from_db(ticker: str) -> pd.DataFrame | None:
     span_days = (df.index.max() - df.index.min()).days
     if span_days < _PRICE_PERF_DB_MIN_SPAN_DAYS:
         return None  # 1Y 미커버(미보유/young/shallow) → yfinance 로
+    # 최신 거래일이 오래됐으면(증분 backfill 누락 등) 그 종가를 '현재가'로 쓰면
+    # 가격·5D 등락률이 실제와 어긋난다 → 신선한 yfinance 로 fallback & self-heal.
+    if not is_ohlcv_fresh(df):
+        logger.debug("price_performance DB stale (%s, 최신 %s) → yfinance", ticker, df.index.max().date())
+        return None
     return df
 
 
 def _price_performance_from_yf(ticker: str) -> pd.DataFrame | None:
-    """yfinance 13mo 일봉 — DB 미보유/얕은 종목 fallback. 컬럼 소문자 정규화."""
+    """yfinance 13mo 일봉 — DB 미보유/얕은/stale 종목 fallback. 컬럼 소문자 정규화.
+
+    DB(price_history)가 raw 종가(auto_adjust=False)로 저장되므로 여기서도 동일하게
+    auto_adjust=False 로 받아 DB-first 경로와 값이 일치하도록 한다(분할/배당 보정 불일치 방지).
+    또한 받은 일봉을 DB 에 upsert 해 stale 했던 DB 를 self-heal 한다.
+    """
     from services.yf_limiter import throttled
     try:
         df = throttled(
-            lambda: yf.download(ticker, period="13mo", interval="1d", progress=False)
+            lambda: yf.download(
+                ticker, period="13mo", interval="1d", progress=False, auto_adjust=False
+            )
         )
     except Exception as e:
         logger.debug("price_performance 다운로드 실패 (%s): %s", ticker, e)
@@ -490,6 +502,15 @@ def _price_performance_from_yf(ticker: str) -> pd.DataFrame | None:
         df.columns = df.columns.get_level_values(0)
     # MultiIndex 해제 후 중복 컬럼 발생 시 첫 번째만 사용
     df = df.loc[:, ~df.columns.duplicated()]
+    # self-heal: 신선한 일봉을 DB 에 upsert (best-effort) — 다음 요청은 DB-first 로 빨라진다.
+    try:
+        from services.price_store import _yf_to_rows, upsert_price_rows
+        # 이 시점 df 컬럼은 아직 'Open'/'Close' (대문자) — _yf_to_rows 가 그 형식을 받는다.
+        rows = _yf_to_rows(df, [ticker.upper().strip()])
+        if rows:
+            upsert_price_rows(rows)
+    except Exception as e:
+        logger.debug("price_performance DB self-heal 실패 (%s): %s", ticker, e)
     return df.rename(columns={
         "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume",
     })
@@ -509,13 +530,19 @@ def _compute_price_periods(df: pd.DataFrame | None) -> list[dict[str, Any]]:
     periods: list[dict[str, Any]] = []
     for label, offset in _PRICE_PERF_OFFSETS:
         target_date = latest_date - offset
-        mask = df.index >= target_date  # target 이후 가장 오래된 거래일
+        mask = df.index >= target_date  # 기간 [target, latest] 구간 (거래량·거래대금 합산용)
         if not mask.any():
             periods.append({"label": label, "change_pct": None, "volume": None, "trading_value": None})
             continue
 
         period_df = df.loc[mask]
-        past_close = _safe(period_df["close"].iloc[0], 6)
+        # 기준가(past_close) = target 시점 '이전(=이하)'의 가장 최근 종가.
+        # 'target 이후 첫 거래일'을 쓰면 1D 처럼 구간 내 거래일이 latest 뿐일 때
+        # 기준가가 현재가와 같아져 등락률이 0% 로 오산된다(월요일 1D 등). target 이전
+        # 종가가 없으면(히스토리 시작 이전) 가장 오래된 종가로 폴백.
+        prior = df.loc[df.index <= target_date, "close"]
+        baseline = prior.iloc[-1] if not prior.empty else period_df["close"].iloc[0]
+        past_close = _safe(baseline, 6)
         change_pct = _safe((current_close - past_close) / past_close * 100, 2) if past_close else None
 
         vol = period_df["volume"].sum() if has_vol else None

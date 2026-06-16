@@ -43,6 +43,63 @@ _TABLE = "price_history"
 
 
 # ---------------------------------------------------------------------------
+# 신선도(staleness) 판정 — DB-first 경로가 오래된 종가를 현재가로 오인하지 않게.
+# ---------------------------------------------------------------------------
+
+def is_ohlcv_fresh(df: pd.DataFrame, max_stale_days: int | None = None) -> bool:
+    """DB OHLCV 의 최신 거래일이 충분히 최근인지 판정.
+
+    DB-first 경로(차트·기간 등락률)가 며칠 오래된 종가를 '현재가'로 오인해
+    잘못된 가격/등락률을 내보내는 것을 막는다. 주말·공휴일을 흡수하도록
+    기본 허용치는 PRICE_DB_STALE_DAYS (달력 기준). 비거나 인덱스가 비정상이면 stale.
+    """
+    if df is None or getattr(df, "empty", True):
+        return False
+    max_stale = PRICE_DB_STALE_DAYS if max_stale_days is None else max_stale_days
+    try:
+        last = df.index.max()
+        last_date = last.date() if hasattr(last, "date") else pd.Timestamp(last).date()
+    except (AttributeError, ValueError, TypeError):
+        return False
+    return (date.today() - last_date).days <= max_stale
+
+
+def latest_price_date(ticker: str) -> date | None:
+    """price_history 에서 해당 ticker 의 가장 최근 거래일 (1 row 조회)."""
+    if not ticker:
+        return None
+    client = _get_client()
+    try:
+        resp = (
+            client.table(_TABLE)
+            .select("date")
+            .eq("ticker", ticker.upper().strip())
+            .order("date", desc=True)
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:
+        logger.warning("latest_price_date 조회 실패 (%s): %s", ticker, e)
+        return None
+    rows = resp.data or []
+    if not rows:
+        return None
+    try:
+        return pd.Timestamp(rows[0]["date"]).date()
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def is_ticker_db_fresh(ticker: str, max_stale_days: int | None = None) -> bool:
+    """특정 ticker 의 DB 최신 거래일이 충분히 최근인지 (전체 히스토리 로드 없이 1 row)."""
+    d = latest_price_date(ticker)
+    if d is None:
+        return False
+    max_stale = PRICE_DB_STALE_DAYS if max_stale_days is None else max_stale_days
+    return (date.today() - d).days <= max_stale
+
+
+# ---------------------------------------------------------------------------
 # 변환 유틸
 # ---------------------------------------------------------------------------
 

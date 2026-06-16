@@ -26,6 +26,7 @@ from config import (
     MIN_VIX,
     MAX_VIX,
     PRICE_FAST_INFO_FALLBACK_MAX_SYMBOLS,
+    PRICE_DB_STALE_DAYS,
     PRICE_DOWNLOAD_BATCH_SIZE,
     PRICE_INTRADAY_INTERVAL,
     SP500_WIKI_URL,
@@ -613,6 +614,21 @@ def refresh_intraday_prices(tickers: list[str]) -> dict[str, dict]:
     return out
 
 
+def _daily_window_fresh(daily: list[dict]) -> bool:
+    """스캔 일봉 윈도우의 마지막 봉이 충분히 최근인지 (라이브 현재가와 섞기 전 검증).
+
+    마지막 봉 날짜가 PRICE_DB_STALE_DAYS(달력 기준)보다 오래되면 stale 로 보고
+    return 재계산을 막는다. 날짜 파싱 실패 시엔 기존 동작 유지(True)."""
+    try:
+        last_date_str = daily[-1].get("date")
+        if not last_date_str:
+            return True
+        last_date = datetime.strptime(last_date_str, "%Y-%m-%d").date()
+        return (datetime.now().date() - last_date).days <= PRICE_DB_STALE_DAYS
+    except (ValueError, TypeError, KeyError, IndexError):
+        return True
+
+
 def merge_intraday_into_candidates(candidates: list[dict], live: dict[str, dict]) -> None:
     """
     live 시세를 top_picks/radar 항목에 제자리 반영한다.
@@ -634,9 +650,12 @@ def merge_intraday_into_candidates(candidates: list[dict], live: dict[str, dict]
 
         # Google "지난 5일" 정의에 맞춘 base = 5포인트 윈도우 첫 점의 OPEN.
         # 최신 분봉 price 와 결합해 등락률을 재계산한다.
+        # 단, daily 윈도우가 오래됐으면(증분 backfill 누락) 그 첫 점은 '5일 전'이 아니라
+        # '며칠 전의 5일 전'이라, 라이브 현재가와 섞으면 등락률이 크게 왜곡된다(예: -18%).
+        # 이 경우 재계산을 건너뛰어 잘못된 값으로 덮어쓰지 않는다.
         try:
             daily = c.get("daily") or []
-            if daily and isinstance(daily, list):
+            if daily and isinstance(daily, list) and _daily_window_fresh(daily):
                 base_open = daily[0].get("open")
                 if base_open is None:
                     # OPEN 이 누락된 경우 close 로 fallback (편차 미미한 종목엔 충분).
