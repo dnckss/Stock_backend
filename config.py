@@ -168,6 +168,39 @@ CORS_ALLOW_ORIGINS: list[str] = (
     else [o.strip() for o in _cors_raw.split(",") if o.strip()]
 )
 
+# ---------------------------------------------------------------------------
+# API 보호 (Public 배포용) — per-IP 레이트리밋 + 선택적 API 키.
+# 비용의 진짜 방어선은 OpenAI 대시보드의 하드 스펜딩 캡이다. 여기 레이트리밋은
+# '남용 속도/반경 제한', API 키는 '봇 차단 속도방지턱'(브라우저 프론트는 키가 노출됨).
+# 보호 대상은 SECURITY_PROTECTED_PREFIX(기본 /api) 하위 경로뿐 — 헬스/문서/웹소켓은 통과.
+# ---------------------------------------------------------------------------
+SECURITY_PROTECTED_PREFIX = os.getenv("SECURITY_PROTECTED_PREFIX", "/api").strip()
+
+# API 키: 비어있으면 검증 비활성(로컬/초기 호환). 값을 넣으면 헤더(API_KEY_HEADER_NAME) 일치 필수.
+API_ACCESS_KEY = os.getenv("API_ACCESS_KEY", "").strip()
+API_KEY_HEADER_NAME = os.getenv("API_KEY_HEADER_NAME", "X-API-Key").strip()
+
+# 레이트리밋 (프로세스 내 슬라이딩 윈도우, per-IP). HF 단일 프로세스 기준 충분.
+# (다중 워커/인스턴스로 확장하면 Redis 등 공용 저장소로 옮겨야 한다.)
+RATE_LIMIT_ENABLED = _bool_env("RATE_LIMIT_ENABLED", "true")
+RATE_LIMIT_WINDOW_SEC = int(os.getenv("RATE_LIMIT_WINDOW_SEC", "60"))
+# 일반 엔드포인트(읽기) per-IP 분당 한도
+RATE_LIMIT_DEFAULT_MAX = int(os.getenv("RATE_LIMIT_DEFAULT_MAX", "120"))
+# LLM/비용 유발 엔드포인트 per-IP 분당 한도(엄격)
+RATE_LIMIT_LLM_MAX = int(os.getenv("RATE_LIMIT_LLM_MAX", "20"))
+# 비용 유발 경로 식별 마커(부분일치) — 경로에 포함되면 LLM 한도 적용.
+#   /chat, /news, /analysis(종목 AI 분석), /risk, /strateg(strategy·strategist),
+#   /economic-calendar/detail(경제지표 AI 해설)
+_llm_markers_raw = os.getenv(
+    "RATE_LIMIT_LLM_MARKERS",
+    "/chat,/news,/analysis,/risk,/strateg,/economic-calendar/detail",
+)
+RATE_LIMIT_LLM_MARKERS: tuple[str, ...] = tuple(
+    m.strip() for m in _llm_markers_raw.split(",") if m.strip()
+)
+# 비활성 IP 의 빈 버킷을 N 요청마다 정리 (메모리 누수 방지)
+RATE_LIMIT_PRUNE_EVERY = int(os.getenv("RATE_LIMIT_PRUNE_EVERY", "1000"))
+
 # yfinance 분봉 시세 (스캔과 별도 — top/radar 종목만 자주 갱신)
 PRICE_TICK_INTERVAL_SEC = int(os.getenv("PRICE_TICK_INTERVAL_SEC", "30"))
 PRICE_TICK_MAX_SYMBOLS = int(os.getenv("PRICE_TICK_MAX_SYMBOLS", "550"))

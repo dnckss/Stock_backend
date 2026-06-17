@@ -27,6 +27,17 @@ FastAPI 백엔드 — 시장·종목·전략(스캐너/스트래티지스트)을
 `STRATEGIST_REASONING_EFFORT`, `MIN_TOP_PICKS_FRESH`,
 `ECON_CALENDAR_INTERVAL_SEC` 등 — `config.py` 참고.
 
+### API 보호 (Public 배포 시 권장)
+
+| Key | 설명 |
+|---|---|
+| `CORS_ALLOW_ORIGINS` | 허용 origin 화이트리스트(콤마). 미설정 시 `*` |
+| `API_ACCESS_KEY` | 설정 시 `/api/*` 요청에 헤더 일치 필수. 비우면 비활성 |
+| `API_KEY_HEADER_NAME` | API 키 헤더명 (기본 `X-API-Key`) |
+| `RATE_LIMIT_DEFAULT_MAX` / `RATE_LIMIT_LLM_MAX` | per-IP 분당 한도 (기본 120 / 20) |
+
+> 레이트리밋은 기본 활성(per-IP). **비용의 진짜 방어선은 OpenAI 대시보드의 하드 스펜딩 캡**이다 — Public 배포 시 반드시 설정할 것.
+
 ## 로컬 실행
 
 ```bash

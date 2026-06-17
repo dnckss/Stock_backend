@@ -41,6 +41,7 @@ from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # orjson: stdlib json 대비 5~10배 빠른 직렬화 + NaN/Inf 자동 None 처리(OPT_PASSTHROUGH 미사용).
 # ORJSONResponse 자체는 fastapi 가 항상 export 하지만, 실제 render() 시 orjson 모듈을
@@ -215,6 +216,12 @@ from config import CORS_ALLOW_ORIGINS, GZIP_MIN_SIZE_BYTES
 # GZip 압축: 큰 JSON 응답(히트맵·전체기록 등)을 전송 단계에서 70~90% 축소.
 # 작은 응답(< GZIP_MIN_SIZE_BYTES) 은 압축 오버헤드가 더 크므로 그대로 둔다.
 app.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_SIZE_BYTES)
+
+# API 보호: per-IP 레이트리밋 + 선택적 API 키 (Public 배포 남용/비용 방어).
+# CORS 보다 먼저 add → CORS 가 더 바깥에 위치 → ① 프리플라이트(OPTIONS)는 CORS 가
+# 먼저 처리하고 ② 차단 응답(401/429)에도 CORS 헤더가 실린다. 로직은 services/security.py.
+from services.security import build_security_dispatch
+app.add_middleware(BaseHTTPMiddleware, dispatch=build_security_dispatch(_DEFAULT_RESPONSE_CLASS))
 
 # allow_credentials 는 화이트리스트일 때만 True (브라우저 정책상 "*" 와 동시 사용 불가)
 _cors_allow_credentials = CORS_ALLOW_ORIGINS != ["*"]
