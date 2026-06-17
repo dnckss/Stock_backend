@@ -12,6 +12,11 @@ on:
     branches: [master]
   workflow_dispatch: {}
 
+# Node 20 액션 deprecation 경고 제거 — JS 액션(checkout/setup-python)을 Node 24 로 실행.
+# (액션 버전을 안 바꿔서 안전. 2026-06 이후 Node 24 가 기본이라 사실상 미래 기본값과 동일.)
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 # 동시 배포 중복 방지 — 최신 커밋만 배포
 concurrency:
   group: deploy-hf
