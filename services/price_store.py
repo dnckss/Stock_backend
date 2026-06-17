@@ -595,11 +595,23 @@ def check_price_history_coverage() -> dict[str, Any]:
     )
     client = _get_client()
     try:
+        # estimated: pg_class.reltuples 기반 추정 — count(*) 전체 스캔/타임아웃 없이 즉시.
+        # 대형 테이블(수백만 행)에서 exact count 는 500("JSON could not be generated") 으로
+        # 실패하기 쉬운데, 그 실패를 0 으로 단정하면 매 기동마다 전체 재부트스트랩이 돌았다.
         resp = (
-            client.table(_TABLE).select("ticker", count="exact", head=True).execute()
+            client.table(_TABLE).select("ticker", count="estimated", head=True).execute()
         )
-        total = getattr(resp, "count", None) or 0
+        total = getattr(resp, "count", None)
+        if not total:
+            # 통계 미수집(reltuples 0/None) 가능성 — 소형/빈 테이블이면 exact 도 가벼움.
+            resp = (
+                client.table(_TABLE).select("ticker", count="exact", head=True).execute()
+            )
+            total = getattr(resp, "count", None) or 0
     except Exception as e:
-        logger.warning("price_history coverage 조회 실패: %s", e)
-        return {"ok": False, "total_rows": 0, "min_rows": min_rows, "error": str(e)}
+        # 조회 실패를 0 으로 단정하면 503종목 풀 재부트스트랩이 돌아 Supabase/yfinance 를
+        # 과부하시키고 연결 종료(ConnectionTerminated) 악순환을 만든다(HF 재기동 빈번).
+        # 알 수 없을 땐 '충분함'으로 보아 스킵 — 증분 backfill·self-heal 이 빈칸을 메운다.
+        logger.warning("price_history coverage 조회 실패: %s — 부트스트랩 스킵(기존 데이터 보존)", e)
+        return {"ok": True, "total_rows": -1, "min_rows": min_rows, "error": str(e)}
     return {"ok": total >= min_rows, "total_rows": int(total), "min_rows": min_rows}
