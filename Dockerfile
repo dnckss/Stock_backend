@@ -26,7 +26,9 @@ COPY --chown=user:user . .
 
 ENV PATH="/home/user/.local/bin:${PATH}"
 
-# HF Spaces 는 PORT=7860 을 주입한다. api.py 가 os.environ.get("PORT") 로 읽음.
+# HF Spaces 는 app_port(README)=7860 으로 라우팅한다. HF 는 PORT env 를 자동 주입하지
+# 않으므로 여기서 명시 고정 — api.py 가 os.environ["PORT"] 를 읽어 반드시 7860 에서 listen.
+ENV PORT=7860
 EXPOSE 7860
 
 CMD ["python", "api.py"]
