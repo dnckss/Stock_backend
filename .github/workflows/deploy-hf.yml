@@ -1,0 +1,56 @@
+name: Deploy to Hugging Face Space
+
+# master 에 push 되면 현재 트리를 HF Space(dncks/quantix-api)로 업로드한다.
+# upload_folder 는 git 히스토리를 보지 않고 '현재 파일'만 올리므로:
+#   - 히스토리에 남아있는 바이너리(quant_trading.db)에 막히지 않는다
+#   - .env 는 .gitignore 라 체크아웃에 애초에 없어 시크릿 유출 위험이 구조적으로 0
+# 필요 사전 설정: GitHub repo Settings → Secrets and variables → Actions 에
+#   HF_TOKEN (write 권한 HF 토큰) 등록.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch: {}
+
+# 동시 배포 중복 방지 — 최신 커밋만 배포
+concurrency:
+  group: deploy-hf
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install huggingface_hub
+        run: pip install --quiet "huggingface_hub>=0.25"
+      - name: Upload current tree to HF Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "::error::HF_TOKEN secret 이 없습니다. repo Settings → Secrets → Actions 에 추가하세요."
+            exit 1
+          fi
+          python - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          sha = os.environ.get("GITHUB_SHA", "")[:7]
+          api.upload_folder(
+              folder_path=".",
+              repo_id="dncks/quantix-api",
+              repo_type="space",
+              commit_message=f"Deploy from GitHub master @ {sha}",
+              ignore_patterns=[
+                  ".git*", ".github*", "*.db", "*.sqlite*",
+                  "*.pyc", "*__pycache__*", ".env", ".env.*",
+                  "venv*", ".venv*", ".claude*", "*.log",
+                  "chat_files*", ".pytest_cache*", ".DS_Store",
+              ],
+          )
+          print(f"✅ HF Space 업로드 완료 (@ {sha})")
+          PY
