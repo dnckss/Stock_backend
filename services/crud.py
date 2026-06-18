@@ -920,6 +920,62 @@ def get_all_backtest_cache() -> list[dict]:
     return out
 
 
+def save_cache_entry(cache_key: str, payload: dict, updated_at_iso: str | None = None) -> None:
+    """backtest_cache 테이블을 범용 KV 영속 캐시로 재사용 — cache_key 기준 upsert.
+
+    전용 테이블(DDL) 추가 없이 펀더멘털 등 다른 영속 캐시도 공유한다.
+    충돌 방지를 위해 키는 네임스페이스를 둔다(예: 'fund:AAPL'). best-effort.
+    """
+    if not cache_key:
+        return
+    client = _get_client()
+    row = {
+        "cache_key": cache_key,
+        "payload_json": json.dumps(sanitize_for_json(payload), ensure_ascii=False),
+        "updated_at": updated_at_iso or datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        client.table("backtest_cache").upsert(row, on_conflict="cache_key").execute()
+    except Exception as e:
+        logger.warning("KV 캐시 DB 저장 실패 (%s): %s", cache_key, e)
+
+
+def get_cache_entry(cache_key: str) -> dict | None:
+    """범용 KV 캐시(backtest_cache)에서 cache_key 1건 조회.
+
+    반환: {"payload": dict, "updated_at": iso_str} 또는 None(없음/실패).
+    """
+    if not cache_key:
+        return None
+    client = _get_client()
+    try:
+        resp = (
+            client.table("backtest_cache")
+            .select("payload_json, updated_at")
+            .eq("cache_key", cache_key)
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:
+        logger.warning("KV 캐시 DB 조회 실패 (%s): %s", cache_key, e)
+        return None
+    rows = resp.data or []
+    if not rows:
+        return None
+    raw = rows[0].get("payload_json")
+    payload = None
+    if isinstance(raw, str):
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            payload = None
+    elif isinstance(raw, dict):
+        payload = raw
+    if payload is None:
+        return None
+    return {"payload": payload, "updated_at": rows[0].get("updated_at")}
+
+
 def get_heatmap_snapshot() -> dict | None:
     """sp500_heatmap 테이블에서 최신 스냅샷을 읽는다. 없으면 None."""
     client = _get_client()

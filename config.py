@@ -237,6 +237,9 @@ FUNDAMENTALS_MAX_OFFICERS = int(os.getenv("FUNDAMENTALS_MAX_OFFICERS", "5"))
 FUNDAMENTALS_MAX_EARNINGS_HISTORY = int(os.getenv("FUNDAMENTALS_MAX_EARNINGS_HISTORY", "8"))
 # 분기 단위 데이터라 자주 안 바뀜 — TTL 1시간으로 yfinance 호출 횟수 줄임 (rate limit 회피)
 FUNDAMENTALS_CACHE_TTL_SEC = int(os.getenv("FUNDAMENTALS_CACHE_TTL_SEC", "3600"))
+# 펀더멘털을 DB(backtest_cache KV)에 영속 캐시 — HF 재시작 후에도 즉시(SWR). 인메모리
+# 캐시 미스 시 DB 보유분을 즉시 반환하고, soft TTL 초과면 백그라운드로 yfinance 재조회.
+FUNDAMENTALS_DB_CACHE_ENABLED = _bool_env("FUNDAMENTALS_DB_CACHE_ENABLED", "true")
 FUNDAMENTALS_VALID_SECTIONS = frozenset({
     "profile", "indicators", "profitability", "growth", "stability", "earnings",
     "price_performance",

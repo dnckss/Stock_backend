@@ -1228,6 +1228,10 @@ async def _do_restore() -> None:
         payload = row.get("payload")
         if not key or payload is None:
             continue
+        # backtest_cache 를 범용 KV 로 공유 — 백테스트 키는 sha1 hex(콜론 없음)다.
+        # 'fund:AAPL' 같은 네임스페이스 키는 백테스트 인메모리 캐시로 복원하지 않는다(오염 방지).
+        if ":" in key:
+            continue
         # 복원 도중 라이브로 계산된(더 신선한) 엔트리는 덮어쓰지 않는다.
         _cache.setdefault(key, (stale_ts, payload))
         restored += 1

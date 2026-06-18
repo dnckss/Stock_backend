@@ -8,7 +8,7 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
@@ -16,6 +16,7 @@ import yfinance as yf
 
 from config import (
     FUNDAMENTALS_CACHE_TTL_SEC,
+    FUNDAMENTALS_DB_CACHE_ENABLED,
     FUNDAMENTALS_MAX_EARNINGS_HISTORY,
     FUNDAMENTALS_MAX_OFFICERS,
     FUNDAMENTALS_MAX_QUARTERS,
@@ -65,6 +66,66 @@ def _set_cached(ticker: str, data: dict[str, Any]) -> None:
 def _get_stale(ticker: str) -> dict[str, Any] | None:
     with _cache_lock:
         return _stale_store.get(ticker)
+
+
+_db_fund_inflight: set[str] = set()
+_db_fund_inflight_lock = threading.Lock()
+
+
+def _fund_db_key(ticker: str) -> str:
+    return f"fund:{ticker.upper().strip()}"
+
+
+def _db_age_sec(updated_at_iso: Any) -> float:
+    """updated_at(ISO) → 현재까지 경과초. 파싱 실패/없음 시 무한대(=오래됨)."""
+    if not updated_at_iso:
+        return float("inf")
+    try:
+        dt = datetime.fromisoformat(str(updated_at_iso).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).total_seconds()
+    except (ValueError, TypeError):
+        return float("inf")
+
+
+def _load_fundamentals_from_db(ticker: str) -> dict[str, Any] | None:
+    """DB(backtest_cache KV)에서 펀더멘털 캐시 1건 → {payload, updated_at} 또는 None."""
+    try:
+        from services.crud import get_cache_entry
+        return get_cache_entry(_fund_db_key(ticker))
+    except Exception as e:
+        logger.debug("펀더멘털 DB 캐시 조회 실패 (%s): %s", ticker, e)
+        return None
+
+
+def _persist_fundamentals_to_db(ticker: str, data: dict[str, Any]) -> None:
+    """펀더멘털을 DB(backtest_cache KV)에 영속 저장 (best-effort, 재시작 후에도 즉시 응답)."""
+    try:
+        from services.crud import save_cache_entry
+        save_cache_entry(_fund_db_key(ticker), data)
+    except Exception as e:
+        logger.debug("펀더멘털 DB 캐시 저장 실패 (%s): %s", ticker, e)
+
+
+def _spawn_fundamentals_refresh(ticker: str) -> None:
+    """백그라운드 스레드로 펀더멘털 재조회(SWR). 동일 종목 중복 방지 — 요청 비차단."""
+    upper = ticker.upper().strip()
+    with _db_fund_inflight_lock:
+        if upper in _db_fund_inflight:
+            return
+        _db_fund_inflight.add(upper)
+
+    def _run() -> None:
+        try:
+            _fetch_all_fundamentals_uncached(upper)  # 계산 + _set_cached + DB 저장
+        except Exception as e:
+            logger.debug("펀더멘털 백그라운드 갱신 실패 (%s): %s", upper, e)
+        finally:
+            with _db_fund_inflight_lock:
+                _db_fund_inflight.discard(upper)
+
+    threading.Thread(target=_run, name=f"fund-refresh-{upper}", daemon=True).start()
 
 
 def _is_empty_fundamentals(data: dict[str, Any]) -> bool:
@@ -597,6 +658,17 @@ def fetch_all_fundamentals(ticker: str) -> dict[str, Any]:
     if cached is not None:
         return cached
 
+    # DB 영속 캐시(SWR) — 인메모리 미스 시 DB 보유분을 즉시 반환(HF 재시작 후에도 빠름).
+    # soft TTL 초과면 백그라운드로 yfinance 재조회. 빈 데이터(yf 차단분)는 무시.
+    if FUNDAMENTALS_DB_CACHE_ENABLED:
+        row = _load_fundamentals_from_db(ticker)
+        payload = row.get("payload") if row else None
+        if isinstance(payload, dict) and not _is_empty_fundamentals(payload):
+            _set_cached(ticker, payload)  # 인메모리 채움 → 다음 호출 즉시
+            if _db_age_sec(row.get("updated_at")) > FUNDAMENTALS_CACHE_TTL_SEC:
+                _spawn_fundamentals_refresh(ticker)
+            return payload
+
     # single-flight: 락 대기 중 다른 스레드가 채웠으면 그 결과를 공유(이중검사).
     lock = _ticker_fetch_lock(ticker)
     with lock:
@@ -645,6 +717,8 @@ def _fetch_all_fundamentals_uncached(ticker: str) -> dict[str, Any]:
 
     data["stale"] = False
     _set_cached(ticker, data)
+    if FUNDAMENTALS_DB_CACHE_ENABLED:
+        _persist_fundamentals_to_db(ticker, data)
     return data
 
 
