@@ -221,6 +221,14 @@ STOCK_CHART_INTRADAY_TTL_SEC = int(os.getenv("STOCK_CHART_INTRADAY_TTL_SEC", "30
 # 장중 마지막 봉(오늘)의 실시간 close 는 fetch_quote(STOCK_QUOTE_CACHE_TTL_SEC=15s)가 별도 갱신.
 STOCK_CHART_DAILY_TTL_SEC = int(os.getenv("STOCK_CHART_DAILY_TTL_SEC", "1800"))
 
+# 차트 DB 조회 lookback 상한(일). 상세페이지가 매번 상장 이후 전체(예: AAPL 1980~,
+# ~11k 봉 1.2MB)를 읽어 느려지던 문제 방지 — 리샘플 키별로 필요한 범위만 조회한다.
+#   day: 일봉(1D/5D/1M/3M/6M 뷰 커버) ~13개월 / week: 주봉(5Y) ~6년 / month: 월봉 ~25년
+#   year(연봉)은 봉 수가 적어 상한 없음(전체).
+STOCK_CHART_DB_LOOKBACK_DAY_DAYS = int(os.getenv("STOCK_CHART_DB_LOOKBACK_DAY_DAYS", "400"))
+STOCK_CHART_DB_LOOKBACK_WEEK_DAYS = int(os.getenv("STOCK_CHART_DB_LOOKBACK_WEEK_DAYS", "2190"))
+STOCK_CHART_DB_LOOKBACK_MONTH_DAYS = int(os.getenv("STOCK_CHART_DB_LOOKBACK_MONTH_DAYS", "9125"))
+
 # ---------------------------------------------------------------------------
 # Stock Fundamentals (종목 펀더멘털)
 # ---------------------------------------------------------------------------

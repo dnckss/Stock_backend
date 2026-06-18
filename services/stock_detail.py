@@ -8,7 +8,7 @@ import logging
 import math
 import threading
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import pandas as pd
@@ -18,6 +18,9 @@ from config import (
     PRICE_BACKFILL_FULL_HISTORY_ENABLED,
     PRICE_HISTORY_COVERAGE_MIN_DAYS,
     STOCK_CHART_DAILY_TTL_SEC,
+    STOCK_CHART_DB_LOOKBACK_DAY_DAYS,
+    STOCK_CHART_DB_LOOKBACK_MONTH_DAYS,
+    STOCK_CHART_DB_LOOKBACK_WEEK_DAYS,
     STOCK_CHART_INTRADAY_TTL_SEC,
     STOCK_QUOTE_CACHE_TTL_SEC,
 )
@@ -38,6 +41,31 @@ _chart_cache_lock = threading.Lock()
 
 
 _CHART_INTRADAY_KEYS = frozenset({"1min", "5min", "30min", "60min"})
+
+# 리샘플 키별 DB 조회 lookback(일). 상세페이지가 매번 상장 이후 전체를 읽어 느리던 문제
+# 방지 — 키가 커버하는 최대 뷰에 맞춰 범위 제한. year(연봉)은 봉 수가 적어 전체(None).
+_DB_CHART_LOOKBACK_DAYS: dict[str, int | None] = {
+    "day": STOCK_CHART_DB_LOOKBACK_DAY_DAYS,
+    "week": STOCK_CHART_DB_LOOKBACK_WEEK_DAYS,
+    "month": STOCK_CHART_DB_LOOKBACK_MONTH_DAYS,
+    "year": None,
+}
+
+# lookback(일) → yfinance period 문자열 (DB 미보유/빈 종목 fallback 도 전체 대신 범위 제한).
+_YF_PERIOD_THRESHOLDS: list[tuple[int, str]] = [
+    (7, "5d"), (31, "1mo"), (95, "3mo"), (185, "6mo"),
+    (370, "1y"), (740, "2y"), (1830, "5y"), (3700, "10y"),
+]
+
+
+def _yf_period_for_lookback(days: int | None) -> str:
+    """lookback 일수를 yfinance period 문자열로 변환. None/초과면 'max'."""
+    if days is None:
+        return "max"
+    for limit, period in _YF_PERIOD_THRESHOLDS:
+        if days <= limit:
+            return period
+    return "max"
 
 # 온디맨드 풀히스토리 백필 — 차트 요청 시 DB 히스토리가 얕으면(상장 이후 전체가 아직
 # 안 채워졌으면) 해당 종목만 1회 백필한다. 프로세스 단위로 종목당 1회만 시도해
@@ -302,9 +330,14 @@ def _chart_bars_from_db(ticker: str, key: str) -> list[dict[str, Any]]:
 
     DB 가 비어 있으면 빈 리스트 (호출부가 yfinance fallback). 주/월/년봉은 일봉 리샘플.
     부트스트랩이 끝난 뒤엔 차트 1회 호출 = DB 조회 1회 (yfinance 호출 0회).
+
+    조회 범위는 키별 lookback 으로 제한해 상장 이후 전체(예: AAPL ~11k 봉/1.2MB)를
+    매번 읽지 않게 한다 — 응답 시간·페이로드를 크게 줄인다.
     """
     from services.price_store import get_ohlcv_db
-    df = get_ohlcv_db(ticker)
+    lookback = _DB_CHART_LOOKBACK_DAYS.get(key)
+    start = (date.today() - timedelta(days=lookback)) if lookback else None
+    df = get_ohlcv_db(ticker, start=start)
     if df is None or df.empty:
         return []
     if key != "day":
@@ -360,8 +393,12 @@ def fetch_chart(ticker: str, period: str = "1D") -> list[dict[str, Any]]:
     # 주/월/년봉은 일봉을 받아 DB 경로와 동일 규칙으로 리샘플 → 일관성 보장.
     # (yfinance 에는 '년' 인터벌이 없어 1wk/1mo/3mo 직접 호출 대신 일봉 리샘플로 통일)
     # auto_adjust=False — DB(price_history)가 raw 종가로 저장되므로 값 일관성을 맞춘다.
+    # 분봉은 preset 그대로, 일봉~연봉은 lookback 으로 기간 제한(전체 'max' 회피 → 응답 가속).
     rule = _RESAMPLE_RULES.get(key)
-    yf_period, yf_interval = ("max", "1d") if rule else preset
+    if key in _CHART_INTRADAY_KEYS:
+        yf_period, yf_interval = preset
+    else:
+        yf_period, yf_interval = _yf_period_for_lookback(_DB_CHART_LOOKBACK_DAYS.get(key)), "1d"
     try:
         df = yf.download(
             ticker, period=yf_period, interval=yf_interval, progress=False, auto_adjust=False
