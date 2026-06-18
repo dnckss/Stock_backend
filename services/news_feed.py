@@ -300,32 +300,24 @@ async def build_news_feed(tickers: list[str]) -> list[dict[str, Any]]:
     return feed
 
 
-async def build_stock_news_feed(ticker: str, limit: int = 10, refresh: bool = False) -> list[dict[str, Any]]:
-    """
-    단일 종목 상세 페이지용 뉴스 피드를 생성한다.
-    - yfinance Ticker.get_news() 수집
-    - FinBERT 배치 감성 분석 점수 부여
-    - 최신순 정렬 + 제목 중복 제거
-    - 티커별 TTL 캐시 적용
-    """
-    upper = (ticker or "").upper().strip()
-    if not upper:
-        return []
+# 종목 뉴스 백그라운드 갱신 중복 spawn 방지 (이벤트 루프 단일 스레드라 plain set 으로 충분)
+_stock_news_inflight: set[str] = set()
 
-    safe_limit = max(1, min(int(limit), 30))
-    if not refresh and _is_stock_news_fresh(upper):
-        return _stock_news_cache[upper][1][:safe_limit]
 
-    fetch_count = max(safe_limit, 10)
+async def _refresh_stock_news(upper: str, safe_limit: int, fetch_count: int) -> list[dict[str, Any]]:
+    """[느린 경로] yfinance 종목 뉴스 수집 → FinBERT 감성 → DB 저장 → 캐시 갱신.
+
+    yfinance get_news + analyze_batch(감성)이 수 초 걸리므로, 핫 패스(상세페이지)에서
+    분리해 이 함수만 백그라운드/최초호출에서 실행한다. 결과(상위 safe_limit)를 반환.
+    """
     try:
-        # 동기 yfinance 호출 — 이벤트 루프 비차단을 위해 to_thread.
         news_items = await asyncio.to_thread(
             lambda: yf.Ticker(upper).get_news(count=fetch_count),
         )
     except Exception as e:
         logger.debug("종목별 뉴스 수집 실패 (%s): %s", upper, e)
-        _stock_news_cache[upper] = (datetime.now(), [])
-        return []
+        _stock_news_cache.setdefault(upper, (datetime.now(), []))
+        return _stock_news_cache[upper][1][:safe_limit]
 
     raw_items: list[dict[str, Any]] = []
     for raw_item in news_items or []:
@@ -334,8 +326,9 @@ async def build_stock_news_feed(ticker: str, limit: int = 10, refresh: bool = Fa
             raw_items.append(parsed)
 
     if not raw_items:
-        _stock_news_cache[upper] = (datetime.now(), [])
-        return []
+        # 빈 결과여도 기존 캐시가 있으면 보존(stale 유지) — 빈칸으로 덮지 않음
+        _stock_news_cache.setdefault(upper, (datetime.now(), []))
+        return _stock_news_cache[upper][1][:safe_limit]
 
     titles = [item["title"] for item in raw_items]
     finbert_results = await asyncio.to_thread(analyze_batch, titles)
@@ -374,9 +367,73 @@ async def build_stock_news_feed(ticker: str, limit: int = 10, refresh: bool = Fa
     _stock_news_cache[upper] = (datetime.now(), result)
 
     # 종목 상세 뉴스도 본문을 미리 크롤링해 DB 에 저장 → 클릭 시 즉시 응답.
-    # (기존엔 종목 뉴스 경로에 본문 프리페치가 없어 클릭마다 on-demand 크롤링 → 느렸다.)
     spawn_logged(prefetch_news_articles(result), name="prefetch_stock_news_articles")
     return result
+
+
+def _spawn_stock_news_refresh(upper: str, safe_limit: int, fetch_count: int) -> None:
+    """백그라운드에서 종목 뉴스 갱신(SWR). 동일 종목 중복 spawn 방지."""
+    if upper in _stock_news_inflight:
+        return
+    _stock_news_inflight.add(upper)
+
+    async def _run() -> None:
+        try:
+            await _refresh_stock_news(upper, safe_limit, fetch_count)
+        except Exception as e:
+            logger.debug("종목 뉴스 백그라운드 갱신 실패 (%s): %s", upper, e)
+        finally:
+            _stock_news_inflight.discard(upper)
+
+    try:
+        asyncio.get_running_loop().create_task(_run())
+    except RuntimeError:
+        _stock_news_inflight.discard(upper)  # 러닝 루프 없음(테스트 등) — 조용히 스킵
+
+
+async def build_stock_news_feed(ticker: str, limit: int = 10, refresh: bool = False) -> list[dict[str, Any]]:
+    """단일 종목 상세 페이지용 뉴스 피드 (Stale-While-Revalidate).
+
+    - 신선 캐시: 즉시 반환
+    - stale 캐시 / DB 보유분: 즉시 반환 + 백그라운드 갱신(요청 비차단) → 상세페이지 지연 제거
+    - 캐시·DB 모두 없음(최초) 또는 refresh=1: 동기 수집(이때만 느림)
+
+    수집(yfinance get_news + FinBERT 감성)이 수 초 걸려서, 핫 패스를 막지 않도록
+    전략/백테스트/차트와 동일한 SWR 패턴을 적용한다.
+    """
+    upper = (ticker or "").upper().strip()
+    if not upper:
+        return []
+
+    safe_limit = max(1, min(int(limit), 30))
+    fetch_count = max(safe_limit, 10)
+
+    # 1) 신선 캐시 → 즉시
+    if not refresh and _is_stock_news_fresh(upper):
+        return _stock_news_cache[upper][1][:safe_limit]
+
+    # 강제 refresh → 동기 수집(최신 보장)
+    if refresh:
+        return await _refresh_stock_news(upper, safe_limit, fetch_count)
+
+    # 2) SWR — stale 캐시 또는 DB 보유분으로 즉시 응답 + 백그라운드 갱신
+    cached = _stock_news_cache.get(upper)
+    stale: list[dict[str, Any]] | None = cached[1] if cached else None
+    if not stale:
+        try:
+            from services.crud import get_news_items
+            db_items = await asyncio.to_thread(get_news_items, limit=safe_limit, ticker=upper)
+            if db_items:
+                stale = enrich_feed_with_llm([_db_item_to_feed_item(d) for d in db_items])
+        except Exception as e:
+            logger.debug("종목 뉴스 DB 조회 실패 (%s): %s", upper, e)
+            stale = None
+    if stale:
+        _spawn_stock_news_refresh(upper, safe_limit, fetch_count)
+        return stale[:safe_limit]
+
+    # 3) 캐시·DB 모두 없음(최초) → 동기 수집 (이때만 느림)
+    return await _refresh_stock_news(upper, safe_limit, fetch_count)
 
 
 # ---------------------------------------------------------------------------
