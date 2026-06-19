@@ -100,17 +100,43 @@ async def _scrape_headlines(client: httpx.AsyncClient, ticker: str) -> list[str]
     return []
 
 
+def _yf_news_headlines(ticker: str) -> list[str]:
+    """yfinance 뉴스 제목 — Finviz 가 빈 결과(HF 데이터센터 IP throttle/차단)일 때 폴백.
+
+    Finviz 는 데이터센터 IP를 강하게 throttle 해서 HF 에선 대부분 빈 헤드라인이 온다.
+    yfinance 뉴스는 HF 에서 안정적으로 동작하므로 헤드라인 수급을 보강한다(감성 0 방지).
+    """
+    try:
+        import yfinance as yf
+        from services.yf_limiter import throttled
+        news = throttled(lambda: yf.Ticker(ticker).get_news(count=SENTIMENT_MAX_HEADLINES)) or []
+    except Exception as e:
+        logger.debug("yfinance 뉴스 헤드라인 폴백 실패 (%s): %s", ticker, e)
+        return []
+    out: list[str] = []
+    for it in news or []:
+        title = (it.get("content") or {}).get("title") or it.get("title")
+        if title and str(title).strip():
+            out.append(str(title).strip())
+    return out
+
+
 async def _analyze_one(
     client: httpx.AsyncClient,
     semaphore: asyncio.Semaphore,
     ticker: str,
 ) -> float:
     """
-    Finviz에서 헤드라인을 가져온 뒤 FinBERT 배치 추론으로 종합 감성 점수를 산출한다.
+    헤드라인(Finviz 우선, 비면 yfinance 폴백)을 가져온 뒤 FinBERT/LLM 배치 추론으로
+    종합 감성 점수를 산출한다.
     """
     async with semaphore:
         await asyncio.sleep(SENTIMENT_FINVIZ_DELAY_SEC)
         headlines = await _scrape_headlines(client, ticker)
+
+    # Finviz 가 비면(HF IP throttle 등) yfinance 뉴스로 폴백 — HF 에서도 감성이 0 안 되게.
+    if not headlines:
+        headlines = await asyncio.to_thread(_yf_news_headlines, ticker)
 
     if not headlines:
         return 0.0
