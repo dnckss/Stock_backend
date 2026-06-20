@@ -211,7 +211,10 @@ async def run_analysis_loop():
             technicals = await asyncio.to_thread(compute_technicals_batch, tech_tickers)
             logger.info("기술적 지표: %s/%s개 확보", len(technicals), len(tech_tickers))
 
-            candidates = compute_signals(candidates, sentiments, earnings, technicals)
+            # 503종목 시그널 계산은 CPU 작업 — to_thread 로 이벤트 루프 비차단(스캔 중 요청 멈춤 방지).
+            candidates = await asyncio.to_thread(
+                compute_signals, candidates, sentiments, earnings, technicals
+            )
             await asyncio.to_thread(save_candidates, candidates)
 
             latest_cache["news_feed"] = await build_news_feed(ticker_list)

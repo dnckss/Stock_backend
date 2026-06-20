@@ -133,15 +133,16 @@ async def _analyze_one(
     async with semaphore:
         await asyncio.sleep(SENTIMENT_FINVIZ_DELAY_SEC)
         headlines = await _scrape_headlines(client, ticker)
+        # Finviz 가 비면(HF IP throttle 등) yfinance 뉴스로 폴백 — HF 에서도 감성이 0 안 되게.
+        if not headlines:
+            headlines = await asyncio.to_thread(_yf_news_headlines, ticker)
+        if not headlines:
+            return 0.0
+        # analyze_batch 는 동기 OpenAI/FinBERT 호출 — to_thread 로 이벤트 루프 비차단.
+        # (기존엔 async 함수 안에서 동기 호출이 이벤트 루프를 막아, 스캔(503종목) 동안
+        #  모든 API 요청이 수 초씩 멈췄다. semaphore 안에 둬 동시 OpenAI 호출도 바운드.)
+        results = await asyncio.to_thread(analyze_batch, headlines)
 
-    # Finviz 가 비면(HF IP throttle 등) yfinance 뉴스로 폴백 — HF 에서도 감성이 0 안 되게.
-    if not headlines:
-        headlines = await asyncio.to_thread(_yf_news_headlines, ticker)
-
-    if not headlines:
-        return 0.0
-
-    results = analyze_batch(headlines)
     scores = [r["score"] for r in results]
     avg = sum(scores) / len(scores)
     return round(max(min(avg, 1.0), -1.0), 4)
