@@ -36,20 +36,48 @@ _quote_stale_store: dict[str, dict[str, Any]] = {}
 # key 는 ticker(quote) / (ticker, period_key)(chart). 모든 접근은 lock 하에 수행.
 _quote_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _quote_cache_lock = threading.Lock()
-_chart_cache: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
+_chart_cache: dict[tuple[Any, ...], tuple[float, list[dict[str, Any]]]] = {}
 _chart_cache_lock = threading.Lock()
 
 
 _CHART_INTRADAY_KEYS = frozenset({"1min", "5min", "30min", "60min"})
 
-# 리샘플 키별 DB 조회 lookback(일). 상세페이지가 매번 상장 이후 전체를 읽어 느리던 문제
-# 방지 — 키가 커버하는 최대 뷰에 맞춰 범위 제한. year(연봉)은 봉 수가 적어 전체(None).
-_DB_CHART_LOOKBACK_DAYS: dict[str, int | None] = {
-    "day": STOCK_CHART_DB_LOOKBACK_DAY_DAYS,
-    "week": STOCK_CHART_DB_LOOKBACK_WEEK_DAYS,
-    "month": STOCK_CHART_DB_LOOKBACK_MONTH_DAYS,
-    "year": None,
+# 프론트 기간 코드 → (리샘플 key, 조회 lookback 일수). 모든 기간을 ≤~1 DB페이지로 묶어
+# 단일 라운드트립·즉시 응답(토스식). 'M'=개월(분봉 아님), 분봉은 _CHART_INTRADAY_KEYS 로 별도.
+# 과거 버그: period.lower() 로 '1M'(월)→'1m'→'1min'(분) 오인 / '1Y'→전체히스토리 연봉(느림).
+_PERIOD_SPEC: dict[str, tuple[str, int | None]] = {
+    "1D": ("day", 7), "5D": ("day", 14),
+    "1W": ("day", 14), "1WK": ("day", 14),
+    "1M": ("day", 45), "1MO": ("day", 45),
+    "3M": ("day", 100), "3MO": ("day", 100),
+    "6M": ("day", 200), "6MO": ("day", 200),
+    "1Y": ("day", STOCK_CHART_DB_LOOKBACK_DAY_DAYS),    # ~13개월 일봉 (1페이지)
+    "2Y": ("week", 820),
+    "5Y": ("week", STOCK_CHART_DB_LOOKBACK_WEEK_DAYS),  # ~6년 주봉
+    "10Y": ("month", STOCK_CHART_DB_LOOKBACK_MONTH_DAYS),
+    "ALL": ("month", None), "MAX": ("month", None),
+    # 하위호환 — 리샘플 키를 직접 보내는 호출부(base /api/stock/{ticker} 등)
+    "DAY": ("day", STOCK_CHART_DB_LOOKBACK_DAY_DAYS),
+    "WEEK": ("week", STOCK_CHART_DB_LOOKBACK_WEEK_DAYS),
+    "MONTH": ("month", STOCK_CHART_DB_LOOKBACK_MONTH_DAYS),
+    "YEAR": ("month", None),
 }
+_PERIOD_DEFAULT_LOOKBACK = STOCK_CHART_DB_LOOKBACK_DAY_DAYS
+
+
+def _resolve_period(period: str) -> tuple[str, int | None, bool]:
+    """기간 문자열 → (리샘플 key, lookback_days, is_intraday).
+
+    분봉(1min/5min/30min/60min)이 우선. 그 외는 대문자 코드(1D/1M/1Y/5Y/ALL…)로 매핑하며
+    모두 lookback 으로 범위를 묶어 단일 DB 페이지로 즉시 응답한다. 미지정은 일봉 기본.
+    """
+    raw = (period or "").strip()
+    if raw.lower() in _CHART_INTRADAY_KEYS:
+        return raw.lower(), None, True
+    spec = _PERIOD_SPEC.get(raw.upper())
+    if spec:
+        return spec[0], spec[1], False
+    return "day", _PERIOD_DEFAULT_LOOKBACK, False
 
 # lookback(일) → yfinance period 문자열 (DB 미보유/빈 종목 fallback 도 전체 대신 범위 제한).
 _YF_PERIOD_THRESHOLDS: list[tuple[int, str]] = [
@@ -315,36 +343,26 @@ def _df_to_bars(df: pd.DataFrame) -> list[dict[str, Any]]:
     return bars
 
 
-def _db_chart_fresh(ticker: str) -> bool:
-    """차트용 DB(price_history) 일봉이 신선한지 — stale 하면 yfinance 로 다시 받게 한다."""
-    try:
-        from services.price_store import is_ticker_db_fresh
-        return is_ticker_db_fresh(ticker)
-    except Exception as e:
-        logger.debug("DB 차트 신선도 확인 실패 (%s): %s", ticker, e)
-        return True  # 확인 불가 시 기존 동작(있는 DB 사용) 유지
+def _chart_bars_from_db(
+    ticker: str, key: str, lookback_days: int | None
+) -> tuple[list[dict[str, Any]], bool]:
+    """price_history 에서 차트 bar + 신선도를 **한 번의 조회**로 반환 → (bars, fresh).
 
-
-def _chart_bars_from_db(ticker: str, key: str) -> list[dict[str, Any]]:
-    """일봉~년봉 차트를 price_history 에서 직접 만들어 반환.
-
-    DB 가 비어 있으면 빈 리스트 (호출부가 yfinance fallback). 주/월/년봉은 일봉 리샘플.
-    부트스트랩이 끝난 뒤엔 차트 1회 호출 = DB 조회 1회 (yfinance 호출 0회).
-
-    조회 범위는 키별 lookback 으로 제한해 상장 이후 전체(예: AAPL ~11k 봉/1.2MB)를
-    매번 읽지 않게 한다 — 응답 시간·페이로드를 크게 줄인다.
+    신선도를 받아온 df 의 마지막 거래일로 바로 판정해, 별도 쿼리(latest_price_date)를
+    없앤다(라운드트립 1회 절감 → 즉시 응답). lookback_days 로 범위를 묶어(≤~1페이지)
+    상장 이후 전체 다중페이지 조회를 피한다. DB 가 비면 ([], False) → 호출부 yfinance fallback.
     """
-    from services.price_store import get_ohlcv_db
-    lookback = _DB_CHART_LOOKBACK_DAYS.get(key)
-    start = (date.today() - timedelta(days=lookback)) if lookback else None
+    from services.price_store import get_ohlcv_db, is_ohlcv_fresh
+    start = (date.today() - timedelta(days=lookback_days)) if lookback_days else None
     df = get_ohlcv_db(ticker, start=start)
     if df is None or df.empty:
-        return []
+        return [], False
+    fresh = is_ohlcv_fresh(df)
     if key != "day":
         rule = _RESAMPLE_RULES.get(key)
         if rule:
             df = _resample_ohlcv(df, rule)
-    return _df_to_bars(df)
+    return _df_to_bars(df), fresh
 
 
 def fetch_chart(ticker: str, period: str = "1D") -> list[dict[str, Any]]:
@@ -354,20 +372,9 @@ def fetch_chart(ticker: str, period: str = "1D") -> list[dict[str, Any]]:
     캐시 히트로 즉시 응답한다. 분봉의 stale 가시성과 일봉의 부하 절감을 균형.
     """
     upper = (ticker or "").upper().strip()
-    key = period.lower().strip()
-    # 축약 키 호환 매핑 (프론트에서 1m, 5m 등으로 보낼 수 있음)
-    _ALIAS: dict[str, str] = {
-        "1m": "1min", "5m": "5min", "30m": "30min", "60m": "60min",
-        "1d": "day", "1w": "week", "1mo": "month", "1y": "year",
-        "5d": "day", "3m": "day", "6m": "day", "5y": "week",
-    }
-    key = _ALIAS.get(key, key)
-    preset = _CHART_PRESETS.get(key)
-    if not preset:
-        preset = _CHART_PRESETS["day"]
-        key = "day"
+    key, lookback, intraday = _resolve_period(period)
 
-    cache_key = (upper, key)
+    cache_key = (upper, key, lookback)
     ttl = _chart_ttl_for(key)
     now = time.time()
     with _chart_cache_lock:
@@ -375,30 +382,26 @@ def fetch_chart(ticker: str, period: str = "1D") -> list[dict[str, Any]]:
         if cached is not None and now - cached[0] < ttl:
             return cached[1]
 
-    # 일봉 이상(day/week/month/year)은 DB(price_history) 에서 직접 — bootstrap 후 yfinance 미사용.
-    # DB 가 비어 있을 때(bootstrap 전 또는 non-S&P 종목)만 아래 yfinance 경로로 fallback.
+    # 일봉+ 는 DB(price_history) **단일 조회**로 즉시 응답(신선도 동시 판정). 분봉만 yfinance.
+    # 히스토리가 얕으면 풀히스토리 백필은 백그라운드(응답 비차단). DB 가 비거나 stale 하면
+    # 아래 yfinance 경로로 신선하게 보강한다.
     db_bars: list[dict[str, Any]] = []
-    if key not in _CHART_INTRADAY_KEYS:
-        # DB 에 있는 만큼 즉시 반환하고, 히스토리가 얕으면 풀히스토리 백필은 백그라운드로
-        # 돌린다(응답 비차단 — 첫 진입 지연 제거). 더 깊은 과거는 다음 방문에 반영.
-        # 단, DB 최신 거래일이 오래됐으면(증분 backfill 누락) 마지막 봉이 며칠 전 종가라
-        # 차트·현재가가 실제와 어긋난다 → 아래 yfinance 경로로 신선하게 다시 받는다.
+    if not intraday:
         _maybe_backfill_full_history(upper)
-        db_bars = _chart_bars_from_db(upper, key)
-        if db_bars and _db_chart_fresh(upper):
+        db_bars, fresh = _chart_bars_from_db(upper, key, lookback)
+        if db_bars and fresh:
             with _chart_cache_lock:
                 _chart_cache[cache_key] = (time.time(), db_bars)
             return db_bars
 
-    # 주/월/년봉은 일봉을 받아 DB 경로와 동일 규칙으로 리샘플 → 일관성 보장.
-    # (yfinance 에는 '년' 인터벌이 없어 1wk/1mo/3mo 직접 호출 대신 일봉 리샘플로 통일)
-    # auto_adjust=False — DB(price_history)가 raw 종가로 저장되므로 값 일관성을 맞춘다.
-    # 분봉은 preset 그대로, 일봉~연봉은 lookback 으로 기간 제한(전체 'max' 회피 → 응답 가속).
+    # 분봉: preset 그대로 / 일봉+ stale·미보유: lookback 범위로 yfinance 재취득 후 리샘플.
+    # auto_adjust=False — DB(raw 종가)와 값 일관성. 전체 'max' 회피로 응답 가속.
     rule = _RESAMPLE_RULES.get(key)
-    if key in _CHART_INTRADAY_KEYS:
+    if intraday:
+        preset = _CHART_PRESETS.get(key) or _CHART_PRESETS["day"]
         yf_period, yf_interval = preset
     else:
-        yf_period, yf_interval = _yf_period_for_lookback(_DB_CHART_LOOKBACK_DAYS.get(key)), "1d"
+        yf_period, yf_interval = _yf_period_for_lookback(lookback), "1d"
     try:
         df = yf.download(
             ticker, period=yf_period, interval=yf_interval, progress=False, auto_adjust=False
