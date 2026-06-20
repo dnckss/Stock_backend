@@ -136,6 +136,12 @@ ERROR_RETRY_SEC = 60
 LOOP_BACKOFF_MAX_SEC = int(os.getenv("LOOP_BACKOFF_MAX_SEC", "1800"))   # 30분 상한
 LOOP_FAILURE_ALERT_THRESHOLD = int(os.getenv("LOOP_FAILURE_ALERT_THRESHOLD", "5"))
 
+# 외부 장애 알림 웹훅 (Discord/Slack incoming webhook URL). 루프가 임계 횟수 연속 실패하면
+# 운영자에게 즉시 알림 — 미설정이면 로그만(현행 동작). 같은 루프는 COOLDOWN 동안 1회만.
+ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "").strip()
+ALERT_WEBHOOK_TIMEOUT_SEC = float(os.getenv("ALERT_WEBHOOK_TIMEOUT_SEC", "5"))
+ALERT_WEBHOOK_COOLDOWN_SEC = int(os.getenv("ALERT_WEBHOOK_COOLDOWN_SEC", "3600"))  # 1시간
+
 # WebSocket 운영
 WS_MAX_CONNECTIONS = int(os.getenv("WS_MAX_CONNECTIONS", "200"))
 WS_HEARTBEAT_INTERVAL_SEC = int(os.getenv("WS_HEARTBEAT_INTERVAL_SEC", "30"))

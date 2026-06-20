@@ -1,8 +1,12 @@
 import asyncio
 import logging
+import time
 from datetime import datetime
 
 from config import (
+    ALERT_WEBHOOK_COOLDOWN_SEC,
+    ALERT_WEBHOOK_TIMEOUT_SEC,
+    ALERT_WEBHOOK_URL,
     ECON_CALENDAR_INTERVAL_SEC,
     ERROR_RETRY_SEC,
     LOOP_BACKOFF_MAX_SEC,
@@ -77,13 +81,46 @@ def _backoff_delay(failures: int) -> int:
     return min(delay, LOOP_BACKOFF_MAX_SEC)
 
 
+# 외부 알림 쿨다운 추적 (loop_name → 마지막 알림 monotonic 시각). 스팸 방지.
+_last_alert_at: dict[str, float] = {}
+
+
+async def _post_alert(message: str) -> None:
+    """장애 알림을 웹훅으로 전송 (best-effort). Discord(content)/Slack(text) 양쪽 키 전송."""
+    try:
+        import httpx
+        payload = {"content": message, "text": message}
+        async with httpx.AsyncClient(timeout=ALERT_WEBHOOK_TIMEOUT_SEC) as client:
+            await client.post(ALERT_WEBHOOK_URL, json=payload)
+    except Exception as e:
+        logger.debug("장애 알림 웹훅 전송 실패: %s", e)
+
+
+def _maybe_alert(loop_name: str, message: str) -> None:
+    """웹훅 설정 시 외부 알림 발송 — 같은 루프는 COOLDOWN 내 1회만(스팸 방지), 비차단."""
+    if not ALERT_WEBHOOK_URL:
+        return
+    now = time.monotonic()
+    if now - _last_alert_at.get(loop_name, 0.0) < ALERT_WEBHOOK_COOLDOWN_SEC:
+        return
+    _last_alert_at[loop_name] = now
+    try:
+        asyncio.get_running_loop().create_task(_post_alert(message))
+    except RuntimeError:
+        pass  # 러닝 루프 없음(테스트 등) — 스킵
+
+
 def _log_loop_failure(loop_name: str, failures: int, exc: BaseException) -> None:
-    """루프 실패를 일관 형식으로 로깅. 누적 임계 초과 시 ERROR 로 격상."""
+    """루프 실패를 일관 형식으로 로깅. 누적 임계 초과 시 ERROR 격상 + 외부 알림(설정 시)."""
     if failures >= LOOP_FAILURE_ALERT_THRESHOLD:
         logger.error(
             "%s 루프 누적 실패 %d회 (>=%d) — 점검 필요: %s",
             loop_name, failures, LOOP_FAILURE_ALERT_THRESHOLD, exc,
             exc_info=True,
+        )
+        _maybe_alert(
+            loop_name,
+            f"🚨 Quantix: '{loop_name}' 루프 연속 {failures}회 실패 — 점검 필요\n{type(exc).__name__}: {exc}",
         )
     else:
         logger.exception("%s 루프 에러 (연속 %d회): %s", loop_name, failures, exc)
