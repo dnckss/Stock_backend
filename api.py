@@ -247,6 +247,16 @@ app.include_router(risk.router)
 app.include_router(sectors.router)
 
 
+@app.get("/health", include_in_schema=False)
+async def health():
+    """라이브니스 헬스체크 — 프로세스가 살아있으면 200.
+
+    호스트(Fly 등) 헬스체크·업타임 모니터(UptimeRobot)용. /api 가 아니라 무인증·무제한이며
+    DB/외부호출 없이 즉답한다(핑 부하 0). 루트 '/'(404) 대신 이걸 핑 대상으로 쓴다.
+    """
+    return {"status": "ok", "service": "quantix-api"}
+
+
 @app.websocket("/ws/market")
 async def websocket_endpoint(websocket: WebSocket):
     """마켓 브로드캐스트 채널.
