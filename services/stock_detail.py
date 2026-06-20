@@ -200,6 +200,35 @@ def _fi_get(fi: Any, key: str, default: Any = None) -> Any:
         return default
 
 
+def _company_fields_from_db(ticker: str) -> dict[str, Any]:
+    """워밍된 DB 펀더멘털 캐시(backtest_cache KV, 'fund:TICKER')에서 quote 용 회사 필드 추출.
+
+    yfinance Ticker.info 는 HF 데이터센터 IP에서 차단돼 매 quote 호출이 15초+ 걸렸다.
+    회사명·섹터·산업·PER·배당 등은 이미 워밍된 fundamentals 에 있으므로 거기서 즉시 가져와
+    info 호출을 제거한다(상세 진입 가속). 캐시 미보유 종목은 빈 dict → name 은 ticker 폴백.
+    """
+    try:
+        from services.crud import get_cache_entry
+        row = get_cache_entry(f"fund:{ticker.upper().strip()}")
+    except Exception as e:
+        logger.debug("quote 회사필드 DB 조회 실패 (%s): %s", ticker, e)
+        return {}
+    payload = (row or {}).get("payload") or {}
+    prof = payload.get("profile") or {}
+    ind = payload.get("indicators") or {}
+    val = ind.get("valuation") or {}
+    div = ind.get("dividends") or {}
+    return {
+        "name": prof.get("name"),
+        "sector": prof.get("sector"),
+        "industry": prof.get("industry"),
+        "pe_ratio": val.get("per"),
+        "forward_pe": val.get("forward_per"),
+        "dividend_yield": div.get("dividend_yield"),
+        "beta": prof.get("beta") if prof.get("beta") is not None else ind.get("beta"),
+    }
+
+
 def fetch_quote(ticker: str) -> dict[str, Any]:
     """
     실시간 시세 + 기본 정보. yfinance 차단으로 핵심 가격이 없으면
@@ -225,17 +254,14 @@ def fetch_quote(ticker: str) -> dict[str, Any]:
         logger.warning("fast_info 조회 실패 (%s): %s", ticker, e)
         fi = None
 
-    # 회사 정보 캐시 활용 (info 호출은 느리고 실패할 수 있음)
+    # 회사 정보 — yfinance Ticker.info 는 HF IP에서 차단(매 호출 15s+) → 워밍된 DB 펀더멘털에서
+    # 가져온다. 정적 데이터라 in-process 캐시로 다음 호출은 DB 조회도 생략(즉시).
     if ticker in _company_info_cache:
         info = _company_info_cache[ticker]
     else:
-        info = {}
-        try:
-            info = throttled(lambda: t.info or {})
-            if info.get("longName") or info.get("shortName"):
-                _company_info_cache[ticker] = info
-        except Exception as e:
-            logger.debug("Ticker.info 조회 실패 (%s): %s", ticker, e)
+        info = _company_fields_from_db(ticker)
+        if info.get("name"):
+            _company_info_cache[ticker] = info
 
     price = _safe(_fi_get(fi, "lastPrice"))
     prev_close = _safe(_fi_get(fi, "previousClose"))
@@ -269,14 +295,14 @@ def fetch_quote(ticker: str) -> dict[str, Any]:
         "year_high": _safe(_fi_get(fi, "yearHigh")),
         "year_low": _safe(_fi_get(fi, "yearLow")),
 
-        # 기업 정보
-        "name": info.get("longName") or info.get("shortName") or ticker,
+        # 기업 정보 (DB 펀더멘털 캐시에서 — info 차단 우회)
+        "name": info.get("name") or ticker,
         "sector": info.get("sector"),
         "industry": info.get("industry"),
         "market_cap": _fi_get(fi, "marketCap"),
-        "pe_ratio": _safe(info.get("trailingPE")),
-        "forward_pe": _safe(info.get("forwardPE")),
-        "dividend_yield": _safe(info.get("dividendYield"), 4),
+        "pe_ratio": _safe(info.get("pe_ratio")),
+        "forward_pe": _safe(info.get("forward_pe")),
+        "dividend_yield": _safe(info.get("dividend_yield"), 4),
         "beta": _safe(info.get("beta")),
         "shares": _fi_get(fi, "shares"),
 
@@ -284,11 +310,11 @@ def fetch_quote(ticker: str) -> dict[str, Any]:
         "ma_50": _safe(_fi_get(fi, "fiftyDayAverage")),
         "ma_200": _safe(_fi_get(fi, "twoHundredDayAverage")),
 
-        # 호가
-        "bid": _safe(info.get("bid")),
-        "ask": _safe(info.get("ask")),
-        "bid_size": info.get("bidSize"),
-        "ask_size": info.get("askSize"),
+        # 호가 — yfinance info(차단) 전용이라 미제공 (실시간 호가는 별도 소스 필요)
+        "bid": None,
+        "ask": None,
+        "bid_size": None,
+        "ask_size": None,
 
         "stale": False,
         "as_of": datetime.now().isoformat(),

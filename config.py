@@ -241,8 +241,10 @@ STOCK_CHART_DB_LOOKBACK_MONTH_DAYS = int(os.getenv("STOCK_CHART_DB_LOOKBACK_MONT
 FUNDAMENTALS_MAX_QUARTERS = int(os.getenv("FUNDAMENTALS_MAX_QUARTERS", "12"))
 FUNDAMENTALS_MAX_OFFICERS = int(os.getenv("FUNDAMENTALS_MAX_OFFICERS", "5"))
 FUNDAMENTALS_MAX_EARNINGS_HISTORY = int(os.getenv("FUNDAMENTALS_MAX_EARNINGS_HISTORY", "8"))
-# 분기 단위 데이터라 자주 안 바뀜 — TTL 1시간으로 yfinance 호출 횟수 줄임 (rate limit 회피)
-FUNDAMENTALS_CACHE_TTL_SEC = int(os.getenv("FUNDAMENTALS_CACHE_TTL_SEC", "3600"))
+# 분기 단위 데이터라 거의 안 바뀜 — TTL 24시간. HF 에선 info(회사정보)가 차단돼 SWR
+# 백그라운드 재호출이 매번 '행(hang)'하며 스레드·CPU 를 잡아먹어 전체 응답을 느리게 했다.
+# DB 워밍분을 길게 신뢰하고 재호출 빈도를 낮춰 경합을 줄인다(데이터는 워밍 재실행으로 갱신).
+FUNDAMENTALS_CACHE_TTL_SEC = int(os.getenv("FUNDAMENTALS_CACHE_TTL_SEC", "86400"))
 # 펀더멘털을 DB(backtest_cache KV)에 영속 캐시 — HF 재시작 후에도 즉시(SWR). 인메모리
 # 캐시 미스 시 DB 보유분을 즉시 반환하고, soft TTL 초과면 백그라운드로 yfinance 재조회.
 FUNDAMENTALS_DB_CACHE_ENABLED = _bool_env("FUNDAMENTALS_DB_CACHE_ENABLED", "true")
