@@ -20,6 +20,18 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
 
+# --- OpenRouter (OpenAI 호환 무료 폴백) ---
+# OpenAI 쿼터/레이트리밋 실패 시 무료 모델로 자동 폴백. base_url 만 바꾸면 OpenAI SDK 그대로 사용.
+# ⚠️ 무료 NVIDIA 엔드포인트는 입력을 로깅·학습에 사용한다(개인정보 금지). 따라서 사용자 데이터
+#    (챗)는 폴백 금지(allow_free=False), 공개 데이터(전략·뉴스·종목분석)만 무료로 라우팅한다.
+# ⚠️ 무료 한도(≈20 RPM, ~1,000회/일) — 고볼륨 감성(스캔)은 폴백 대상 아님(FinBERT/축소).
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip()
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free").strip()
+OPENROUTER_SITE_URL = os.getenv("OPENROUTER_SITE_URL", "").strip()        # HTTP-Referer (랭킹용, 선택)
+OPENROUTER_SITE_NAME = os.getenv("OPENROUTER_SITE_NAME", "Quantix").strip()  # X-Title (선택)
+LLM_FREE_FALLBACK_ENABLED = _bool_env("LLM_FREE_FALLBACK_ENABLED", "true")
+
 
 def validate_required_env(strict: bool | None = None) -> list[str]:
     """필수 환경변수 검증.
